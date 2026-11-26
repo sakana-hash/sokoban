@@ -156,3 +156,43 @@ class TrainingRunTest(unittest.TestCase):
                 resumed.advance(1)
                 expected = shaped_reward(expected_base, before, potential(game), False, DISCOUNT)
                 self.assertAlmostEqual(resumed.replay.state_dict()["items"][-1][2], expected)
+
+    def test_episode_counts_across_resumes(self):
+        import torch
+        from training.env import ACTIONS, Game
+        from training.runner import Episode, Trainer
+        from training.train import Config
+
+        config = Config(num_envs=3, max_episode_steps=2)
+        fields = ("episodes", "episodes_won", "episodes_lost", "episodes_unknown")
+
+        def finish_two_games(trainer):
+            corridor = ("#######", "#@  $.#", "#######")
+            trainer.slots = [
+                Episode(Game(("#####", "#@$.#", "#####")), 2, length=1),  # Win on the last step.
+                Episode(Game(corridor), 2, length=1),  # Time limit without a win.
+                Episode(Game(corridor), 2),  # Still in progress.
+            ]
+            with patch.object(trainer, "actions", return_value=[ACTIONS.index("right")] * 3):
+                trainer.advance(3)
+
+        trainer = Trainer(config, "cpu", None)
+        finish_two_games(trainer)
+        metrics = trainer.training_metrics()
+        self.assertEqual(tuple(metrics[key] for key in fields), (2, 1, 1, 0))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            trainer.save(output)
+            checkpoint = torch.load(output / "latest.pt", weights_only=True)
+            self.assertEqual(tuple(checkpoint[key] for key in fields), (2, 1, 1, 0))
+
+            for key in fields[1:]:
+                del checkpoint[key]
+            checkpoint.update(steps=300, episodes=120, recent_wins=[True] * 60 + [False] * 40)
+            legacy = Trainer(config, "cpu", checkpoint)
+            finish_two_games(legacy)
+            legacy.save(output)
+            resumed = Trainer(config, "cpu", torch.load(output / "latest.pt", weights_only=True))
+            metrics = resumed.training_metrics()
+            self.assertEqual(tuple(metrics[key] for key in fields), (122, 61, 41, 20))

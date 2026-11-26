@@ -55,6 +55,8 @@ class Trainer:
         self.steps = 0
         self.updates = 0
         self.episodes = 0
+        self.episodes_won = 0
+        self.episodes_unknown = 0
         self.recent_wins = deque(maxlen=100)
         self.last_loss = None
         self.stage = 1
@@ -111,7 +113,8 @@ class Trainer:
             slot.length += 1
             slot.state = encode(slot.game)
             slot.mask = legal_mask(slot.game)
-            terminal = slot.game.won or not any(slot.mask)
+            won = slot.game.won
+            terminal = won or not any(slot.mask)
             if self.version == 2:
                 after = potential(slot.game)
                 reward = shaped_reward(reward, slot.potential, after, terminal, DISCOUNT)
@@ -121,7 +124,8 @@ class Trainer:
             if terminal or slot.length >= self.config.max_episode_steps:
                 # A time limit resets the collector, but the stored state can still bootstrap.
                 self.episodes += 1
-                self.recent_wins.append(slot.game.won)
+                self.episodes_won += int(won)
+                self.recent_wins.append(won)
                 self.slots[i] = self.new_episode()
 
         first_update = max(before + 1, self.config.warmup, self.config.batch_size)
@@ -160,6 +164,14 @@ class Trainer:
     def loss_value(self):
         return float(self.last_loss) if self.last_loss is not None else None
 
+    def episode_counts(self):
+        return {
+            "episodes": self.episodes,
+            "episodes_won": self.episodes_won,
+            "episodes_lost": self.episodes - self.episodes_won - self.episodes_unknown,
+            "episodes_unknown": self.episodes_unknown,
+        }
+
     def save(self, output):
         policy = self.policy()
         full = {
@@ -169,7 +181,7 @@ class Trainer:
             "optimizer": self.optimizer.state_dict(),
             "replay": self.replay.state_dict(),
             "updates": self.updates,
-            "episodes": self.episodes,
+            **self.episode_counts(),
             "recent_wins": list(self.recent_wins),
             "last_loss": self.loss_value(),
             "stage": self.stage,
@@ -193,6 +205,9 @@ class Trainer:
         self.episodes = checkpoint["episodes"]
         self.last_loss = checkpoint["last_loss"]
         self.recent_wins.extend(checkpoint["recent_wins"])
+        # Older checkpoints only kept outcomes for the last 100 completed episodes.
+        self.episodes_won = checkpoint.get("episodes_won", sum(self.recent_wins))
+        self.episodes_unknown = checkpoint.get("episodes_unknown", self.episodes - len(self.recent_wins))
         self.stage = checkpoint.get("stage", min(4, 1 + self.steps // self.config.curriculum_steps))
         self.best_policy = checkpoint.get("best_policy")
         self.slots = [
@@ -209,7 +224,7 @@ class Trainer:
         now = perf_counter()
         self.last_log = (now, self.steps, self.updates)
         return {
-            "steps": self.steps, "updates": self.updates, "episodes": self.episodes,
+            "steps": self.steps, "updates": self.updates, **self.episode_counts(),
             "epsilon": round(self.epsilon(), 4), "loss": loss, "training_max_boxes": self.stage,
             "full_start_probability": round(1 - single_box_easy_probability(self.steps), 4)
             if self.version == 2 and self.stage == 1 else 1.0,

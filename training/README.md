@@ -106,8 +106,10 @@ python -m training.train --device cuda --resume runs/ddqn-v2-revisit/latest.pt -
 | `event` | 记录内容 |
 | --- | --- |
 | `start` | 启动时间（UTC）、设备、模型版本、训练配置、起始步数、目标步数和续训来源。 |
-| `train` | 累计步数、更新次数、探索率、损失、最近 100 局胜率和吞吐量等训练指标。 |
+| `train` | 累计步数、已结束的训练局数及胜负、更新次数、探索率、损失、最近 100 局胜率和吞吐量。 |
 | `validation` | 验证步数、各箱数的通关数、每组关数、当前课程等级和最佳检查点步数。 |
+
+每结束一局训练，通关计入 `episodes_won`，未通关且用尽步数或无合法动作计入 `episodes_lost`。仍在进行的局等到结束时再计数。每条训练记录都满足 `episodes = episodes_won + episodes_lost + episodes_unknown`。`latest.pt` 保存累计数供续训。新实验的 `episodes_unknown` 为 0。从旧检查点恢复时，根据其中最近最多 100 局的结果计入胜负，更早的局归入 `episodes_unknown`。
 
 在原实验目录续训会追加一条 `start` 记录，再继续写指标。指定新的 `--output` 会从恢复点开始建立该目录的日志。旧版检查点只保留存档时的训练状态，此前的完整曲线需从当时保存的终端输出中获取。
 
