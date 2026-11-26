@@ -1,10 +1,13 @@
+"""Serve the browser game and its JSON endpoints on localhost."""
+
 import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from urllib.parse import urlsplit
 
-from . import LEVELS, load_level, solve
+from ..levels import LEVELS
+from .api import play_request
 
 
 ASSETS = {
@@ -12,28 +15,8 @@ ASSETS = {
     "/index.html": ("index.html", "text/html"),
     "/style.css": ("style.css", "text/css"),
     "/app.js": ("app.js", "text/javascript"),
+    "/board.js": ("board.js", "text/javascript"),
 }
-
-
-def play_request(request: object) -> dict:
-    """Rebuild the position from a level and its move history for one client."""
-    if not isinstance(request, dict):
-        raise ValueError("请求须为 JSON 对象")
-    game = load_level(request.get("level"))
-    actions = request.get("actions", [])
-    command = request.get("command", "state")
-    if not isinstance(actions, list):
-        raise ValueError("actions 须为方向数组")
-    if command not in ("state", "solve"):
-        raise ValueError("未知指令")
-    for action in actions:
-        if action not in ("up", "down", "left", "right"):
-            raise ValueError("方向须为 up、down、left 或 right")
-        game.move(action)
-    result = game.observation()
-    if command == "solve":
-        result["solution"] = solve(game)
-    return result
 
 
 class GameHandler(BaseHTTPRequestHandler):
@@ -55,7 +38,7 @@ class GameHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"levels": levels})
         elif path in ASSETS:
             name, mime = ASSETS[path]
-            content = files("sokoban").joinpath("static", name).read_bytes()
+            content = files(__package__).joinpath("static", name).read_bytes()
             self.send_data(HTTPStatus.OK, content, mime)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)

@@ -53,3 +53,16 @@ python3.12 -m unittest discover -s tests
 ## 训练神经网络
 
 独立的 Double DQN 训练程序使用随机生成的关卡自主试玩，支持 CUDA 训练、断点续训和内置 30 关评估。服务器安装和运行步骤见 [训练说明](training/README.md)。
+
+## 项目结构
+
+| 位置 | 职责 |
+|---|---|
+| `src/sokoban/` | 游戏引擎、30 个内置关卡、求解器和游戏命令行入口 |
+| `src/sokoban/server/` | 浏览器游戏的 HTTP 服务、JSON 接口，以及 `static/` 下的页面、样式和棋盘绘制代码 |
+| `training/env/` | 训练棋盘的生成、观测编码、奖励和死锁判定 |
+| `training/dqn/` | 各版本 Q 网络、经验回放、张量组批和 Double DQN 更新 |
+| `training/runner/` | 单局采样、训练循环、验证和检查点读写 |
+| `training/evaluate/` | 策略回放、固定种子评估、随机基线和报告 |
+| `tests/`、`training/tests/` | 游戏测试和训练测试 |
+| `runs/` | 各次实验的权重、日志、评估和性能报告 |

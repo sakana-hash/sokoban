@@ -94,7 +94,7 @@ class EvaluationTests(unittest.TestCase):
         with TemporaryDirectory() as directory, redirect_stdout(StringIO()):
             args = Namespace(checkpoint=Path(directory) / "best.pt", generated=1, max_boxes=1,
                              seed=2027, max_steps=1, compare_random=True, deadlock_detection=False)
-            with patch("training.evaluate.evaluation_boards", return_value=[("死锁开局", deadlocked)]):
+            with patch("training.evaluate.benchmark.evaluation_boards", return_value=[("死锁开局", deadlocked)]):
                 run_evaluation(args, lambda _, mask: mask.index(True), "cpu", 3, 1000)
             path, = (Path(directory) / "evaluations").glob("*.json")
             report = json.loads(path.read_text(encoding="utf-8"))

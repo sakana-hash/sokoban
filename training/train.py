@@ -1,30 +1,11 @@
 """Run Double DQN self-play from the repository root."""
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from math import isfinite
 from pathlib import Path
 
-from .env import DEFAULT_REVISIT_PENALTY
-
-
-@dataclass(frozen=True)
-class Config:
-    seed: int = 42
-    num_envs: int = 16
-    batch_size: int = 64
-    replay_size: int = 50_000
-    warmup: int = 2_000
-    epsilon_steps: int = 150_000
-    curriculum_steps: int = 10_000
-    max_episode_steps: int = 256
-    validation_rooms: int = 32
-    revisit_penalty: float = DEFAULT_REVISIT_PENALTY
-    deadlock_penalty: float = -1.0
-    small_board_curriculum: bool = True
-    model_version: int = 2
-    deadlock_detection: bool = True
-    anneal_easy_starts: bool = True
+from .config import Config
 
 
 def main() -> None:
@@ -46,7 +27,7 @@ def main() -> None:
     parser.add_argument("--eval-after-train", action="store_true",
                         help="训练完成后用默认参数评估 best.pt，尚无最佳权重时使用 policy.pt")
     parser.add_argument("--revisit-penalty", type=float,
-                        help=f"训练中每次折返的额外扣分，默认 {DEFAULT_REVISIT_PENALTY}，0 表示关闭")
+                        help=f"训练中每次折返的额外扣分，默认 {Config.revisit_penalty}，0 表示关闭")
     parser.add_argument("--deadlock-penalty", type=float,
                         help=f"推入死锁时加到奖励上的值，默认 {Config.deadlock_penalty}，设为 0 仍结束该局")
     parser.add_argument("--small-board-curriculum", action=argparse.BooleanOptionalAction, default=None,
