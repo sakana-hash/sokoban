@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sokoban.engine import DIRECTIONS, Game, Point
 
 ACTIONS = ("up", "down", "left", "right")
+DEFAULT_REVISIT_PENALTY = 0.02
 SIDE = 10
 AREA = SIDE * SIDE
 
@@ -38,7 +39,10 @@ def legal_mask(game: Game) -> tuple[bool, ...]:
     return tuple(action in legal for action in ACTIONS)
 
 
-def step_game(game: Game, action: int, visited_since_push: set[Point] | None = None) -> float:
+def step_game(
+    game: Game, action: int, visited_since_push: set[Point] | None = None,
+    *, revisit_penalty: float = DEFAULT_REVISIT_PENALTY,
+) -> float:
     """Advance one legal move, optionally tracking revisits between pushes."""
     if not 0 <= action < len(ACTIONS):
         raise ValueError(f"invalid action index {action}")
@@ -52,7 +56,7 @@ def step_game(game: Game, action: int, visited_since_push: set[Point] | None = N
         if game.pushes != pushes_before:
             visited_since_push.clear()
         elif game.player in visited_since_push:
-            reward -= 0.02
+            reward -= revisit_penalty
         visited_since_push.add(game.player)
     return reward
 

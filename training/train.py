@@ -2,8 +2,10 @@
 
 import argparse
 from dataclasses import asdict, dataclass
+from math import isfinite
 from pathlib import Path
 
+from .env import DEFAULT_REVISIT_PENALTY
 
 DEFAULT_OUTPUT = Path("runs/ddqn-v2")
 
@@ -19,6 +21,7 @@ class Config:
     curriculum_steps: int = 10_000
     max_episode_steps: int = 256
     validation_rooms: int = 32
+    revisit_penalty: float = DEFAULT_REVISIT_PENALTY
 
 
 def main() -> None:
@@ -28,6 +31,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help=f"新任务默认保存到项目根目录下的 {DEFAULT_OUTPUT}")
     parser.add_argument("--resume", type=Path, help="从完整的 latest.pt 恢复")
     parser.add_argument("--save-every", type=int, default=25_000, help="每多少个环境步保存一次")
+    parser.add_argument("--revisit-penalty", type=float,
+                        help=f"v2 训练中每次折返的额外扣分，默认 {DEFAULT_REVISIT_PENALTY}，0 表示关闭")
     options = {
         "seed": "随机种子",
         "num_envs": "每轮同时采样的环境数",
@@ -45,6 +50,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.steps < 1 or args.save_every < 1:
         parser.error("--steps 和 --save-every 必须大于 0")
+    if args.revisit_penalty is not None and (not isfinite(args.revisit_penalty) or args.revisit_penalty < 0):
+        parser.error("--revisit-penalty 必须为非负有限数")
 
     try:
         import torch
@@ -79,7 +86,7 @@ def main() -> None:
                     raise ValueError(f"续训时 {name} 必须与检查点一致（{values[name]}）")
                 values[name] = override
         config = Config(**values)
-        if any(value < 1 for name, value in values.items() if name not in ("seed", "warmup")):
+        if any(values[name] < 1 for name in options if name not in ("seed", "warmup")):
             raise ValueError("环境数、训练批量、经验池和步数参数均须为正整数")
         if config.warmup < 0 or config.batch_size > config.replay_size:
             raise ValueError("预热步数不能为负，经验池须能容纳一个训练批量")

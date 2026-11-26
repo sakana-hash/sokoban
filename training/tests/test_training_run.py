@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 @unittest.skipUnless(find_spec("torch"), "requires the separate training environment")
 class TrainingRunTest(unittest.TestCase):
-    def run_cli(self, module: str, *args: str | Path) -> str:
+    def run_cli(self, module: str, *args: str | Path, expected_code: int = 0) -> str:
         result = subprocess.run(
             [sys.executable, "-m", module, "--device", "cpu", *map(str, args)],
             cwd=Path(__file__).resolve().parents[2],
@@ -23,8 +23,8 @@ class TrainingRunTest(unittest.TestCase):
             text=True,
             timeout=120,
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return result.stdout
+        self.assertEqual(result.returncode, expected_code, result.stdout + result.stderr)
+        return result.stderr if expected_code else result.stdout
 
     def test_train_validate_resume_evaluate(self):
         import torch
@@ -37,6 +37,7 @@ class TrainingRunTest(unittest.TestCase):
                 "training.train", "--output", output, "--num-envs", "2", "--steps", "8",
                 "--batch-size", "2", "--warmup", "2", "--replay-size", "16",
                 "--max-episode-steps", "4", "--curriculum-steps", "4", "--validation-rooms", "1",
+                "--revisit-penalty", "0.04",
             )
             metrics = output / "metrics.jsonl"
             first_lines = metrics.read_text(encoding="utf-8").splitlines()
@@ -44,6 +45,7 @@ class TrainingRunTest(unittest.TestCase):
             self.assertEqual((start["event"], start["steps"], start["target_steps"]), ("start", 0, 8))
             self.assertIsNone(start["resume"])
             self.assertEqual(start["config"]["num_envs"], 2)
+            self.assertEqual(start["config"]["revisit_penalty"], 0.04)
             self.assertEqual([e["event"] for e in events], ["validation", "train", "validation"])
             self.assertEqual(
                 [{k: v for k, v in e.items() if k not in ("event", "timestamp")} for e in events],
@@ -59,11 +61,15 @@ class TrainingRunTest(unittest.TestCase):
                 y1, x1 = divmod(successor[3 * AREA:].index(1), SIDE)
                 self.assertEqual((x1 - x0, y1 - y0), DIRECTIONS[ACTIONS[action]])
 
+            error = self.run_cli("training.train", "--resume", latest, "--steps", "12",
+                                 "--revisit-penalty", "0.02", expected_code=1)
+            self.assertIn("revisit_penalty", error)
             self.run_cli("training.train", "--resume", latest, "--steps", "12")
             lines = metrics.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[:len(first_lines)], first_lines)
             restart, train, validation = map(json.loads, lines[len(first_lines):])
             self.assertEqual((restart["event"], restart["steps"], restart["resume"]), ("start", 8, str(latest)))
+            self.assertEqual(restart["config"]["revisit_penalty"], 0.04)
             self.assertEqual((train["steps"], validation["validation_steps"]), (12, 12))
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["steps"], 12)
@@ -126,6 +132,7 @@ class TrainingRunTest(unittest.TestCase):
             self.run_cli("training.train", "--resume", latest, "--steps", "4")
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["version"], 1)
+            self.assertEqual(resumed["config"]["revisit_penalty"], 0.02)
             self.assertEqual(resumed["steps"], 4)
             self.assertGreater(resumed["updates"], 0)
 
@@ -135,7 +142,7 @@ class TrainingRunTest(unittest.TestCase):
         from training.runner import DISCOUNT, Episode, Trainer
         from training.train import Config
 
-        config = Config(num_envs=1)
+        config = Config(num_envs=1, revisit_penalty=0.04)
         trainer = Trainer(config, "cpu", None)
         game = Game(("#######", "# @ $.#", "#######"))
         trainer.slots = [Episode(game, 2)]
@@ -146,7 +153,7 @@ class TrainingRunTest(unittest.TestCase):
             checkpoint = torch.load(Path(temporary) / "latest.pt", weights_only=True)
 
         # At the left wall the only legal move returns to the starting square.
-        for has_history, expected_base in ((True, -0.03), (False, -0.01)):
+        for has_history, expected_base in ((True, -0.05), (False, -0.01)):
             with self.subTest(has_history=has_history):
                 if not has_history:
                     del checkpoint["slots"][0]["visited_since_push"]

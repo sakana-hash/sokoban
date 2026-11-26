@@ -109,7 +109,9 @@ class Trainer:
         before = self.steps
         for i, (slot, action) in enumerate(zip(slots, self.actions(slots))):
             previous = slot.state
-            reward = step_game(slot.game, action, slot.visited_since_push)
+            reward = step_game(
+                slot.game, action, slot.visited_since_push, revisit_penalty=self.config.revisit_penalty,
+            )
             slot.length += 1
             slot.state = encode(slot.game)
             slot.mask = legal_mask(slot.game)

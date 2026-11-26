@@ -74,6 +74,16 @@ class EnvironmentTests(unittest.TestCase):
                 self.assertIn(len(game.boxes), range(1, limit + 1))
                 step_game(game, legal_mask(game).index(True))
 
+    def test_configured_revisit_penalty(self):
+        for penalty, expected in ((0.04, -0.05), (0.0, -0.01)):
+            with self.subTest(penalty=penalty):
+                game = Game(("#######", "#@  $.#", "#######"))
+                visited = {game.player}
+                outward = step_game(game, ACTIONS.index("right"), visited, revisit_penalty=penalty)
+                inward = step_game(game, ACTIONS.index("left"), visited, revisit_penalty=penalty)
+                self.assertAlmostEqual(outward, -0.01)
+                self.assertAlmostEqual(inward, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
