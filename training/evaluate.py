@@ -20,11 +20,12 @@ def play_batch(
     max_steps: int,
     *,
     detect_cycle: bool = True,
+    deadlock_detection: bool = True,
 ) -> list[str]:
     """Make one inference call for all games awaiting a decision in each round."""
     limits = [g.moves + max_steps for g in games]
     seen = [set() for _ in games]
-    outcomes = ["死锁" if is_deadlocked(game) else "" for game in games]
+    outcomes = ["死锁" if deadlock_detection and is_deadlocked(game) else "" for game in games]
     active = [i for i, outcome in enumerate(outcomes) if not outcome]
     while active:
         states = []
@@ -57,7 +58,7 @@ def play_batch(
             game = games[i]
             previous_boxes = game.boxes
             step_game(game, action)
-            if pushed_into_deadlock(game, previous_boxes):
+            if deadlock_detection and pushed_into_deadlock(game, previous_boxes):
                 outcomes[i] = "死锁"
             else:
                 active.append(i)
@@ -70,12 +71,15 @@ def play_level(
     max_steps: int,
     *,
     detect_cycle: bool = True,
+    deadlock_detection: bool = True,
 ) -> str:
     """Play up to max_steps primitive moves. Disable cycle detection for stochastic policies."""
     def choose_one(states, masks):
         return [choose_action(states[0], masks[0])]
 
-    return play_batch([game], choose_one, max_steps, detect_cycle=detect_cycle)[0]
+    return play_batch(
+        [game], choose_one, max_steps, detect_cycle=detect_cycle, deadlock_detection=deadlock_detection,
+    )[0]
 
 
 def evaluation_boards(
@@ -114,6 +118,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--max-boxes", type=int, choices=range(1, 5), default=4, help="生成地图的箱数上限")
     parser.add_argument("--seed", type=int, default=2026, help="固定生成地图与随机基线的种子")
     parser.add_argument("--compare-random", action="store_true", help="在相同开局对照均匀随机合法动作")
+    parser.add_argument("--deadlock-detection", action=argparse.BooleanOptionalAction, default=True,
+                        help="检测到死锁时提前结束评估，默认开启")
     args = parser.parse_args(argv)
     if args.max_steps < 1 or (args.generated is not None and args.generated < 1):
         parser.error("步数上限和生成地图数量必须大于 0")
@@ -156,6 +162,7 @@ def run_evaluation(
 ) -> None:
     # This stream never advances the map generator. Both policies see identical maps.
     actions_rng = random.Random(args.seed + 1)
+    deadlock_detection = getattr(args, "deadlock_detection", True)
 
     def random_action(state: bytes, mask: Sequence[int]) -> int:
         return actions_rng.choice([action for action, legal in enumerate(mask) if legal])
@@ -176,7 +183,7 @@ def run_evaluation(
     for level, (title, rows) in enumerate(boards, start=1):
         game = Game(rows)
         boxes = len(game.boxes)
-        outcome = play_level(game, greedy, args.max_steps)
+        outcome = play_level(game, greedy, args.max_steps, deadlock_detection=deadlock_detection)
         attempts[boxes] += 1
         wins[boxes] += int(game.won)
         outcomes[outcome] += 1
@@ -189,7 +196,8 @@ def run_evaluation(
             print(f"{level:02d} {title} | {boxes} 箱 | {outcome} | {game.moves} 步 {game.pushes} 推")
         if args.compare_random:
             baseline = Game(rows)
-            random_outcome = play_level(baseline, random_action, args.max_steps, detect_cycle=False)
+            random_outcome = play_level(baseline, random_action, args.max_steps, detect_cycle=False,
+                                        deadlock_detection=deadlock_detection)
             random_wins[boxes] += int(baseline.won)
             random_deadlocks += int(random_outcome == "死锁")
             record["random"] = {"outcome": random_outcome, "moves": baseline.moves, "pushes": baseline.pushes}
@@ -236,7 +244,7 @@ def run_evaluation(
         "source": "builtin" if args.generated is None else "generated",
         "seed": args.seed, "generated": args.generated,
         "max_boxes": args.max_boxes if args.generated is not None else None,
-        "max_steps": args.max_steps, "compare_random": args.compare_random,
+        "max_steps": args.max_steps, "compare_random": args.compare_random, "deadlock_detection": deadlock_detection,
         "summary": summary, "by_boxes": by_boxes, "levels": levels,
         **({"by_board_size": by_board_size} if by_board_size else {}),
     })

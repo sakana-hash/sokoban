@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from training.env import ACTIONS, Game
 from training.evaluate import evaluation_boards, play_level, run_evaluation
@@ -22,6 +23,7 @@ class EvaluationTests(unittest.TestCase):
             run_evaluation(args, greedy, "cpu", 2, 230000)
             first, = reports.glob("*.json")
             paired = json.loads(first.read_text(encoding="utf-8"))
+            self.assertTrue(paired["deadlock_detection"])
             self.assertEqual((paired["checkpoint"], paired["checkpoint_steps"]), ("best.pt", 230000))
             self.assertEqual([row["level"] for row in paired["levels"]], list(range(1, 9)))
             for policy, field in [("model", "wins"), ("random", "random_wins")]:
@@ -82,6 +84,23 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual((outcome, game.moves, game.pushes), ("死锁", 1, 1))
                 outcome = play_level(game, lambda *_: self.fail("deadlocked game requested an action"), 5)
                 self.assertEqual((outcome, game.moves), ("死锁", 1))
+
+    def test_historical_evaluation_continues_after_deadlock_for_both_policies(self):
+        rows = ("######", "#.@$ #", "#    #", "######")
+        game = Game(rows)
+        result = play_level(game, lambda *_: ACTIONS.index("right"), 1, deadlock_detection=False)
+        self.assertEqual(result, "达到步数上限")
+        deadlocked = game.observation()["board"]
+        with TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            args = Namespace(checkpoint=Path(directory) / "best.pt", generated=1, max_boxes=1,
+                             seed=2027, max_steps=1, compare_random=True, deadlock_detection=False)
+            with patch("training.evaluate.evaluation_boards", return_value=[("死锁开局", deadlocked)]):
+                run_evaluation(args, lambda _, mask: mask.index(True), "cpu", 3, 1000)
+            path, = (Path(directory) / "evaluations").glob("*.json")
+            report = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(report["deadlock_detection"])
+            for policy in ("model", "random"):
+                self.assertEqual(report["levels"][0][policy]["outcome"], "达到步数上限")
 
     def test_each_physical_move_requires_one_four_way_decision(self):
         rows = ("########", "#@  $. #", "########")

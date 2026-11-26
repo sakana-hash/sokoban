@@ -7,9 +7,9 @@ from .env import SIDE, Game, make_training_game
 SMALL_BOARD_MAX_SIDE = 7
 
 
-def single_box_easy_probability(steps: int) -> float:
-    """Hold the opening mix for 50k moves, then fade it to 25% easy by 200k."""
-    if steps <= 50_000:
+def single_box_easy_probability(steps: int, *, anneal: bool = True) -> float:
+    """Start at 75% easy; optionally fade to 25% between 50k and 200k moves."""
+    if not anneal or steps <= 50_000:
         return 0.75
     progress = min(1.0, (steps - 50_000) / 150_000)
     return 0.75 - 0.50 * progress
@@ -22,8 +22,11 @@ def single_box_small_board_probability(steps: int) -> float:
     return 0.75 * max(0, 150_000 - steps) / 100_000
 
 
-def make_single_box_game(rng: Random, steps: int, *, small_board_curriculum: bool) -> Game:
-    extra_pulls = 1 if rng.random() < single_box_easy_probability(steps) else None
+def make_single_box_game(
+    rng: Random, steps: int, *, small_board_curriculum: bool, anneal_easy_starts: bool = True,
+) -> Game:
+    easy_probability = single_box_easy_probability(steps, anneal=anneal_easy_starts)
+    extra_pulls = 1 if rng.random() < easy_probability else None
     probability = single_box_small_board_probability(steps) if small_board_curriculum else 0.0
     max_side = SIDE
     if probability > 0 and rng.random() < probability:

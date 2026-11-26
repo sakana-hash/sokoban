@@ -22,6 +22,7 @@ from .env import (
     pushed_into_deadlock, shaped_reward, step_game,
 )
 from .evaluate import play_batch
+from .profiling import TrainingProfile, null_region
 from .runtime import checkpoint_version
 
 
@@ -36,8 +37,8 @@ class Episode:
         self.length = length
         self.state = encode(game)
         self.mask = legal_mask(game)
-        self.potential = potential(game) if version == 2 else 0.0
-        self.visited_since_push = {game.player, *visited_since_push} if version == 2 else None
+        self.potential = potential(game) if version >= 2 else 0.0
+        self.visited_since_push = {game.player, *visited_since_push} if version >= 2 else None
 
     def snapshot(self) -> dict:
         snapshot = {"board": self.game.observation()["board"], "length": self.length}
@@ -47,14 +48,16 @@ class Episode:
 
 
 class Trainer:
-    def __init__(self, config, device, checkpoint):
+    def __init__(self, config, device, checkpoint, *, channels_last=False):
         self.config = config
         self.device = device
+        self.channels_last = channels_last
         self.rng = random.Random(config.seed)
         torch.manual_seed(config.seed)
-        self.version = 2 if checkpoint is None else checkpoint_version(checkpoint)
-        self.online = make_network(self.version).to(device)
-        self.target = make_network(self.version).to(device).eval()
+        self.version = config.model_version if checkpoint is None else checkpoint_version(checkpoint)
+        layout = torch.channels_last if channels_last else torch.contiguous_format
+        self.online = make_network(self.version).to(device, memory_format=layout)
+        self.target = make_network(self.version).to(device, memory_format=layout).eval()
         self.target.requires_grad_(False)
         self.optimizer = torch.optim.Adam(self.online.parameters(), lr=3e-4)
         self.replay = ReplayBuffer(config.replay_size)
@@ -79,9 +82,10 @@ class Trainer:
     def new_episode(self):
         if self.version == 1:
             self.stage = min(4, 1 + self.steps // self.config.curriculum_steps)
-        if self.version == 2 and self.stage == 1:
+        if self.version >= 2 and self.stage == 1:
             game = make_single_box_game(
                 self.rng, self.steps, small_board_curriculum=self.config.small_board_curriculum,
+                anneal_easy_starts=self.config.anneal_easy_starts,
             )
         else:
             game = make_training_game(self.rng, self.stage)
@@ -99,31 +103,35 @@ class Trainer:
         return self.new_episode()
 
     @torch.no_grad()
-    def greedy(self, states, masks):
-        values = self.online(state_batch(states, self.device))
-        legal = mask_batch(masks, self.device)
-        return values.masked_fill(~legal, -torch.inf).argmax(dim=1).tolist()
+    def greedy(self, states, masks, *, region=null_region):
+        boards = state_batch(states, self.device, channels_last=self.channels_last, region=region)
+        with region("policy_compute"):
+            values = self.online(boards)
+        legal = mask_batch(masks, self.device, region=region)
+        with region("policy_compute"):
+            actions = values.masked_fill(~legal, -torch.inf).argmax(dim=1)
+        with region("transfer"):
+            return actions.tolist()
 
-    def actions(self, slots):
-        epsilon = self.epsilon()
-        actions = []
-        exploit = []
-        for i, slot in enumerate(slots):
-            if self.rng.random() < epsilon:
-                actions.append(self.rng.choice([a for a, legal in enumerate(slot.mask) if legal]))
-            else:
-                actions.append(None)
-                exploit.append(i)
+    def actions(self, slots, *, region=null_region):
+        with region("action_selection"):
+            epsilon = self.epsilon()
+            actions = []
+            exploit = []
+            for i, slot in enumerate(slots):
+                if self.rng.random() < epsilon:
+                    actions.append(self.rng.choice([a for a, legal in enumerate(slot.mask) if legal]))
+                else:
+                    actions.append(None)
+                    exploit.append(i)
         if exploit:
-            greedy = self.greedy([slots[i].state for i in exploit], [slots[i].mask for i in exploit])
+            greedy = self.greedy([slots[i].state for i in exploit], [slots[i].mask for i in exploit], region=region)
             for i, action in zip(exploit, greedy):
                 actions[i] = action
         return actions
 
-    def advance(self, count):
-        slots = self.slots[:count]
-        before = self.steps
-        for i, (slot, action) in enumerate(zip(slots, self.actions(slots))):
+    def advance_environments(self, slots, actions):
+        for i, (slot, action) in enumerate(zip(slots, actions, strict=True)):
             previous = slot.state
             previous_boxes = slot.game.boxes
             reward = step_game(
@@ -133,11 +141,11 @@ class Trainer:
             slot.state = encode(slot.game)
             slot.mask = legal_mask(slot.game)
             won = slot.game.won
-            deadlocked = not won and pushed_into_deadlock(slot.game, previous_boxes)
+            deadlocked = self.config.deadlock_detection and not won and pushed_into_deadlock(slot.game, previous_boxes)
             if deadlocked:
                 reward += self.config.deadlock_penalty
             terminal = won or deadlocked or not any(slot.mask)
-            if self.version == 2:
+            if self.version >= 2:
                 after = potential(slot.game)
                 reward = shaped_reward(reward, slot.potential, after, terminal, DISCOUNT)
                 slot.potential = after
@@ -147,15 +155,23 @@ class Trainer:
                 # A time limit resets the collector, but the stored state can still bootstrap.
                 self.slots[i] = self.finish_episode(won=won, deadlocked=deadlocked)
 
+    def advance(self, count, *, region=null_region):
+        slots = self.slots[:count]
+        before = self.steps
+        actions = self.actions(slots, region=region)
+        with region("environment"):
+            self.advance_environments(slots, actions)
         first_update = max(before + 1, self.config.warmup, self.config.batch_size)
         for _ in range((first_update + 3) // 4 * 4, self.steps + 1, 4):
             self.last_loss = optimize(
                 self.online, self.target, self.optimizer, self.replay,
                 self.config.batch_size, DISCOUNT, self.device, self.rng,
+                channels_last=self.channels_last, region=region,
             )
             self.updates += 1
             if self.updates % 500 == 0:
-                self.target.load_state_dict(self.online.state_dict())
+                with region("train_compute"):
+                    self.target.load_state_dict(self.online.state_dict())
 
     def policy(self):
         return {"version": self.version, "steps": self.steps, "online": self.online.state_dict()}
@@ -167,7 +183,7 @@ class Trainer:
         games = [game for _, game in validation_games(per_count)]
         for start in range(0, len(games), self.config.batch_size):
             batch = games[start:start + self.config.batch_size]
-            outcomes = play_batch(batch, self.greedy, 256)
+            outcomes = play_batch(batch, self.greedy, 256, deadlock_detection=self.config.deadlock_detection)
             for game, outcome in zip(batch, outcomes, strict=True):
                 group = len(game.boxes) - 1
                 wins[group] += int(game.won)
@@ -224,6 +240,12 @@ class Trainer:
         self.online.load_state_dict(checkpoint["online"])
         self.target.load_state_dict(checkpoint["target"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
+        # Adam restores moment tensors with their saved strides when switching layouts.
+        layout = torch.channels_last if self.channels_last else torch.contiguous_format
+        for state in self.optimizer.state.values():
+            for name, tensor in state.items():
+                if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
+                    state[name] = tensor.to(memory_format=layout)
         self.replay.load_state_dict(checkpoint["replay"])
         self.steps = checkpoint["steps"]
         self.updates = checkpoint["updates"]
@@ -244,7 +266,7 @@ class Trainer:
         torch.set_rng_state(checkpoint["torch_rng"])
         # A checkpoint from before deadlock detection can still contain a stranded box.
         for i, slot in enumerate(self.slots):
-            if is_deadlocked(slot.game):
+            if self.config.deadlock_detection and is_deadlocked(slot.game):
                 self.slots[i] = self.finish_episode(won=False, deadlocked=True)
 
     def training_metrics(self):
@@ -253,12 +275,12 @@ class Trainer:
         then, old_steps, old_updates = self.last_log
         now = perf_counter()
         self.last_log = (now, self.steps, self.updates)
-        single_box_stage = self.version == 2 and self.stage == 1
+        single_box_stage = self.version >= 2 and self.stage == 1
+        easy_probability = single_box_easy_probability(self.steps, anneal=self.config.anneal_easy_starts)
         return {
             "steps": self.steps, "updates": self.updates, **self.episode_counts(),
             "epsilon": round(self.epsilon(), 4), "loss": loss, "training_max_boxes": self.stage,
-            "full_start_probability": round(1 - single_box_easy_probability(self.steps), 4)
-            if single_box_stage else 1.0,
+            "full_start_probability": round(1 - easy_probability, 4) if single_box_stage else 1.0,
             "small_board_probability": round(single_box_small_board_probability(self.steps), 4)
             if single_box_stage and self.config.small_board_curriculum else 0.0,
             "decisions_per_sec": round((self.steps - old_steps) / (now - then), 1),
@@ -277,11 +299,36 @@ def atomic_save(payload, path):
         temporary.unlink(missing_ok=True)
 
 
-def run(config, device, goal, save_every, output, checkpoint, resume) -> Path:
+def profile_advances(trainer, goal, save_every, output, max_rounds):
+    start = trainer.steps
+    initial_updates = trainer.updates
+    initial_epsilon = trainer.epsilon()
+    # Finish the last regular collector batch before doing any logging, validation or I/O.
+    intervals = [2000, save_every]
+    if trainer.version >= 2:
+        intervals.append(trainer.config.curriculum_steps)
+    next_boundary = min((start // n + 1) * n for n in intervals)
+    profile = TrainingProfile(trainer.device)
+    profile.start()
+    rounds = 0
+    try:
+        while rounds < max_rounds and trainer.steps < min(goal, next_boundary):
+            trainer.advance(min(trainer.config.num_envs, goal - trainer.steps), region=profile.region)
+            rounds += 1
+    except BaseException:
+        profile.abort()
+        raise
+    return profile.stop(output, start_step=start, end_step=trainer.steps, rounds=rounds,
+                        updates=trainer.updates - initial_updates,
+                        epsilon_start=initial_epsilon, epsilon_end=trainer.epsilon())
+
+
+def run(config, device, goal, save_every, output, checkpoint, resume, *,
+        profile_start=None, profile_rounds=16, channels_last=False) -> Path:
     # A fresh run owns a new directory. A resumed run may continue in its own directory.
     continuing = resume is not None and output.resolve() == resume.resolve().parent
     output.mkdir(parents=True, exist_ok=continuing)
-    trainer = Trainer(config, device, checkpoint)
+    trainer = Trainer(config, device, checkpoint, channels_last=channels_last)
     if checkpoint is not None:
         # Drop the loaded replay snapshot so evicted samples can be reclaimed.
         checkpoint.clear()
@@ -292,18 +339,27 @@ def run(config, device, goal, save_every, output, checkpoint, resume) -> Path:
             history.flush()
             print(message if message is not None else json.dumps(values), flush=True)
 
+        parameters = sum(p.numel() for p in trainer.online.parameters() if p.requires_grad)
         record("start", {
             "device": str(device), "version": trainer.version, "steps": trainer.steps,
+            "trainable_parameters": parameters, "channels_last": channels_last,
             "target_steps": goal, "save_every": save_every, "config": asdict(config),
             "resume": str(resume) if resume is not None else None, "output": str(output),
-        }, f"device={device}  version={trainer.version}  steps={trainer.steps}→{goal}  output={output}")
+        }, (f"device={device}  version={trainer.version}  parameters={parameters}  "
+            f"steps={trainer.steps}→{goal}  channels_last={channels_last}  output={output}"))
         while trainer.steps < goal:
             before = trainer.steps
-            trainer.advance(min(config.num_envs, goal - before))
+            count = min(config.num_envs, goal - before)
+            if profile_start is not None and before + count > profile_start:
+                summary = profile_advances(trainer, goal, save_every, output, profile_rounds)
+                record("profile", {"start_step": before, "end_step": trainer.steps, "summary": str(summary)})
+                profile_start = None
+            else:
+                trainer.advance(count)
             if trainer.steps // 2000 != before // 2000 or trainer.steps == goal:
                 record("train", trainer.training_metrics())
             crossed_validation_interval = trainer.steps // config.curriculum_steps != before // config.curriculum_steps
-            validation_due = trainer.version == 2 and crossed_validation_interval
+            validation_due = trainer.version >= 2 and crossed_validation_interval
             if validation_due:
                 record("validation", trainer.validate())
             if validation_due or trainer.steps // save_every != before // save_every or trainer.steps == goal:

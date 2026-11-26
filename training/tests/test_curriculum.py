@@ -17,6 +17,7 @@ class CurriculumTests(unittest.TestCase):
         ):
             with self.subTest(steps=steps):
                 self.assertAlmostEqual(single_box_easy_probability(steps), easy)
+                self.assertEqual(single_box_easy_probability(steps, anneal=False), 0.75)
                 self.assertAlmostEqual(single_box_small_board_probability(steps), small)
 
     def test_small_board_sampling_is_independent_of_easy_starts(self):
@@ -38,13 +39,16 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(len(combinations), 4)
 
     def test_regular_board_sampling_preserves_seeded_starts(self):
-        for steps, enabled in ((0, False), (150_000, True)):
-            with self.subTest(steps=steps, small_board_curriculum=enabled):
+        for steps, enabled, anneal in ((0, False, True), (150_000, True, True), (400_000, False, False)):
+            with self.subTest(steps=steps, small_board_curriculum=enabled, anneal=anneal):
                 training_rng, reference_rng = Random(42), Random(42)
                 for _ in range(5):
-                    easy = reference_rng.random() < single_box_easy_probability(steps)
+                    probability = single_box_easy_probability(steps) if anneal else 0.75
+                    easy = reference_rng.random() < probability
                     expected = make_training_game(reference_rng, 1, max_extra_pulls=1 if easy else None)
-                    game = make_single_box_game(training_rng, steps, small_board_curriculum=enabled)
+                    game = make_single_box_game(
+                        training_rng, steps, small_board_curriculum=enabled, anneal_easy_starts=anneal,
+                    )
                     self.assertEqual(encode(game), encode(expected))
 
     def test_validation_is_repeatable_and_balanced(self):

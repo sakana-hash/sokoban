@@ -34,7 +34,7 @@ class TrainingRunTest(unittest.TestCase):
             output = Path(temporary) / "run"
             latest = output / "latest.pt"
             console = self.run_cli(
-                "training.train", "--output", output, "--num-envs", "2", "--steps", "8",
+                "training.train", "--model-version", "3", "--output", output, "--num-envs", "2", "--steps", "8",
                 "--batch-size", "2", "--warmup", "2", "--replay-size", "16",
                 "--max-episode-steps", "4", "--curriculum-steps", "4", "--validation-rooms", "1",
                 "--revisit-penalty", "0.04", "--deadlock-penalty", "-10",
@@ -43,6 +43,7 @@ class TrainingRunTest(unittest.TestCase):
             first_lines = metrics.read_text(encoding="utf-8").splitlines()
             start, *events = map(json.loads, first_lines)
             self.assertEqual((start["event"], start["steps"], start["target_steps"]), ("start", 0, 8))
+            self.assertEqual(start["version"], 3)
             self.assertIsNone(start["resume"])
             self.assertEqual(start["config"]["num_envs"], 2)
             self.assertEqual(start["config"]["revisit_penalty"], 0.04)
@@ -53,6 +54,8 @@ class TrainingRunTest(unittest.TestCase):
                 [json.loads(line) for line in console.splitlines() if line.startswith("{")],
             )
             initial = torch.load(latest, map_location="cpu", weights_only=True)
+            self.assertEqual(initial["version"], 3)
+            self.assertTrue(all("visited_since_push" in slot for slot in initial["slots"]))
             experience = initial["replay"]["items"]
             self.assertEqual(len(experience), 8)
             for state, action, _, successor, mask, _ in experience:
@@ -65,12 +68,28 @@ class TrainingRunTest(unittest.TestCase):
             error = self.run_cli("training.train", "--resume", latest, "--steps", "12",
                                  "--revisit-penalty", "0.02", expected_code=1)
             self.assertIn("revisit_penalty", error)
+            self.run_cli("training.train", "--resume", latest, "--steps", "12",
+                         "--model-version", "2", expected_code=1)
             reports = output / "evaluations"
             self.assertEqual(list(reports.glob("*.json")), [])
-            console = self.run_cli("training.train", "--resume", latest, "--steps", "12", "--eval-after-train")
+            self.assertFalse((output / "profiles").exists())
+            console = self.run_cli(
+                "training.train", "--resume", latest, "--steps", "12", "--eval-after-train",
+                "--channels-last", "--profile", "--profile-start", "9", "--profile-rounds", "16",
+            )
+            summary_file, = (output / "profiles").glob("*/summary.json")
+            summary = json.loads(summary_file.read_text(encoding="utf-8"))
+            self.assertEqual([summary[k] for k in ("start_step", "end_step", "rounds", "updates")], [8, 12, 2, 1])
+            self.assertGreater(summary["wall_ms"], 0)
+            self.assertIsNone(summary["gpu"])
+            for phase in ("environment", "data_prep", "train_compute"):
+                self.assertGreater(summary["host_ms"][phase], 0)
+            trace = json.loads((summary_file.parent / "trace.json").read_text(encoding="utf-8"))
+            self.assertTrue(trace["traceEvents"] if isinstance(trace, dict) else trace)
             lines = metrics.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[:len(first_lines)], first_lines)
-            restart, train, validation = map(json.loads, lines[len(first_lines):])
+            restart, profile, train, validation = map(json.loads, lines[len(first_lines):])
+            self.assertEqual((profile["event"], profile["start_step"], profile["end_step"]), ("profile", 8, 12))
             self.assertEqual((restart["event"], restart["steps"], restart["resume"]), ("start", 8, str(latest)))
             self.assertEqual(restart["config"]["revisit_penalty"], 0.04)
             self.assertEqual(restart["config"]["deadlock_penalty"], -10)
@@ -78,7 +97,14 @@ class TrainingRunTest(unittest.TestCase):
             self.assertEqual((train["steps"], validation["validation_steps"]), (12, 12))
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["steps"], 12)
+            self.assertEqual(resumed["version"], 3)
             self.assertIs(resumed["config"]["small_board_curriculum"], True)
+            runtime_options = {"profile", "profile_start", "profile_rounds", "channels_last"}
+            self.assertTrue(runtime_options.isdisjoint(resumed["config"]))
+            for network in ("online", "target"):
+                self.assertEqual(initial[network].keys(), resumed[network].keys())
+                weights = [value for value in resumed[network].values() if value.ndim == 4]
+                self.assertTrue(all(weight.is_contiguous(memory_format=torch.channels_last) for weight in weights))
             self.assertGreater(resumed["updates"], initial["updates"])
             self.assertEqual(len(resumed["replay"]["items"]), 12)
             self.assertEqual(resumed["replay"]["items"][:8], experience)
@@ -90,10 +116,17 @@ class TrainingRunTest(unittest.TestCase):
             self.assertRegex(console, r"总通关 \d+/30")
             report_path, = reports.glob("*.json")
             report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["version"], 3)
             self.assertEqual(report["checkpoint"], "best.pt")
             self.assertEqual(report["checkpoint_steps"], validation["best_validation_step"])
             self.assertEqual((report["source"], report["seed"], report["max_steps"]), ("builtin", 2026, 256))
             self.assertFalse(report["compare_random"])
+
+            self.run_cli("training.train", "--resume", latest, "--steps", "16", "--profile", "--profile-rounds", "1")
+            second_file, = set((output / "profiles").glob("*/summary.json")) - {summary_file}
+            second = json.loads(second_file.read_text(encoding="utf-8"))
+            self.assertEqual((second["start_step"], second["end_step"], second["rounds"]), (12, 14, 1))
+            self.assertEqual(json.loads(summary_file.read_text(encoding="utf-8")), summary)
 
     def test_v1_walk_weights_evaluate_and_full_checkpoint_resumes(self):
         import torch
@@ -159,6 +192,7 @@ class TrainingRunTest(unittest.TestCase):
 
         config = Config(num_envs=1, revisit_penalty=0.04)
         trainer = Trainer(config, "cpu", None)
+        self.assertEqual(trainer.version, 2)
         game = Game(("#######", "# @ $.#", "#######"))
         trainer.slots = [Episode(game, 2)]
         with patch.object(trainer, "actions", return_value=[ACTIONS.index("left")]):
@@ -219,14 +253,14 @@ class TrainingRunTest(unittest.TestCase):
             metrics = resumed.training_metrics()
             self.assertEqual(tuple(metrics[key] for key in fields), (122, 61, 41, 20))
 
-    def test_deadlocking_push_records_terminal_reward_even_on_last_step(self):
+    def test_deadlock_setting_controls_reward_and_bootstrap_on_last_step(self):
         from training.env import ACTIONS, Game, potential, shaped_reward
         from training.runner import DISCOUNT, Episode, Trainer
         from training.train import Config
 
-        for penalty in (-1.0, -10.0, 0.0):
-            with self.subTest(penalty=penalty):
-                config = Config(num_envs=1, max_episode_steps=1, deadlock_penalty=penalty)
+        for detect, penalty in ((True, -1.0), (True, -10.0), (True, 0.0), (False, -10.0)):
+            with self.subTest(detection=detect, penalty=penalty):
+                config = Config(num_envs=1, max_episode_steps=1, deadlock_penalty=penalty, deadlock_detection=detect)
                 trainer = Trainer(config, "cpu", None)
                 game = Game(("#######", "# $@ .#", "#     #", "#######"))
                 trainer.slots = [Episode(game, 2)]
@@ -235,8 +269,9 @@ class TrainingRunTest(unittest.TestCase):
                     trainer.advance(1)
                 _, _, reward, _, legal, terminal = trainer.replay.state_dict()["items"][0]
                 self.assertTrue(any(legal))  # The player can still walk away from the frozen box.
-                self.assertTrue(terminal)
-                self.assertAlmostEqual(reward, shaped_reward(-0.01 + penalty, before, 0, True, DISCOUNT))
+                self.assertEqual(terminal, detect)
+                base_reward = -0.01 + (penalty if detect else 0)
+                self.assertAlmostEqual(reward, shaped_reward(base_reward, before, potential(game), detect, DISCOUNT))
                 self.assertEqual(trainer.episode_counts()["episodes_lost"], 1)
-                self.assertEqual(trainer.episodes_deadlocked, 1)
+                self.assertEqual(trainer.episodes_deadlocked, int(detect))
                 self.assertIsNot(trainer.slots[0].game, game)

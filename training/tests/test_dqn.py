@@ -7,14 +7,46 @@ from importlib.util import find_spec
 if find_spec("torch") is not None:
     import torch
 
-    from training.dqn import CHANNELS, ReplayBuffer, make_network, optimize
-    from training.env import ACTIONS, SIDE
+    from training.dqn import CHANNELS, ReplayBuffer, make_network, optimize, state_batch
+    from training.env import ACTIONS, SIDE, Game, encode
 else:
     torch = None
 
 
 @unittest.skipIf(torch is None, "requires the separate training environment")
 class DoubleDQNTests(unittest.TestCase):
+    def test_channels_last_preserves_board_axes_and_q_values(self):
+        boards = [
+            encode(Game(("#######", "#@ $ .#", "#######"))),
+            encode(Game(("#####", "#  .#", "# $@#", "#####"))),
+        ]
+        device = torch.device("cpu")
+        plain = state_batch(boards, device)
+        formatted = state_batch(boards, device, channels_last=True)
+        self.assertTrue(plain.is_contiguous())
+        self.assertTrue(formatted.is_contiguous(memory_format=torch.channels_last))
+        self.assertTrue(torch.equal(plain, formatted))
+
+        model = make_network(3)
+        with torch.no_grad():
+            expected = model(plain)
+            model.to(memory_format=torch.channels_last)
+            torch.testing.assert_close(model(formatted), expected)
+
+    def test_v3_doubles_trainable_parameters_and_scores_four_actions(self):
+        network = make_network(3)
+        counts = [sum(p.numel() for p in net.parameters() if p.requires_grad)
+                  for net in (make_network(2), network)]
+        self.assertEqual(counts, [38_308, 76_616])
+
+        states = torch.zeros(2, CHANNELS, SIDE, SIDE)
+        states[0, 3, 6, 3] = 1
+        states[1, 3, 1, 9] = 1
+        values = network(states)
+        self.assertEqual(values.shape, (2, len(ACTIONS)))
+        values.sum().backward()
+        self.assertTrue(all(p.grad is not None for p in network.parameters() if p.requires_grad))
+
     def test_v2_reads_four_directional_q_values_at_each_players_square(self):
         net = make_network(2)
         states = torch.zeros(2, CHANNELS, SIDE, SIDE)

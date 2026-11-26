@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def checkpoint_version(checkpoint: dict) -> int:
-    if isinstance(checkpoint, dict) and checkpoint.get("version") in (1, 2):
+    if isinstance(checkpoint, dict) and checkpoint.get("version") in (1, 2, 3):
         return checkpoint["version"]
     raise ValueError("无法识别检查点版本")
 

@@ -80,6 +80,40 @@ python -m training.train --device cuda --steps 250000 --no-small-board-curriculu
 
 在训练或续训命令末尾加 `--eval-after-train`，即可在最后一次保存后自动运行一次 `training.evaluate`。优先使用 `best.pt`，尚无最佳权重时使用 `policy.pt`。评估脚本默认自动选择设备，评估内置 30 关，每关最多 256 步，种子为 2026，随机基线默认关闭。报告写入本次实验的 `evaluations/` 目录。
 
+### 对照模型容量
+
+在服务器的项目根目录运行 `bash training/run_v3_experiments.sh`，即可依次用 v3 重跑已有的 7 组正式配置。每组从零训练 400,000 个环境步，训练种子为 42。每组训练完成后用 `best.pt` 评估种子 2027 的 1,000 个单箱开局和内置 30 关，同时运行随机基线。日志、权重和报告分别写入 `runs/ddqn-v3-400k-*/` 下的实验子目录。
+
+批量脚本默认在每组训练的第 160,000 步开始采样 16 轮，此时默认探索率已降至 0.05。每组的性能摘要和 CUDA 时间线写入该组的 `profiles/steps-*/` 目录。运行 `bash training/run_v3_experiments.sh --no-profile` 可关闭采样。
+
+若 `baseline` 和 `mix` 已完成，可从第一个尚未开跑的组开始，把余下各组写入原批次。将下方路径换成实际批次目录。每组独立初始化模型，`--start-from` 指定的组也会运行。省略 `--batch-dir` 会为所选各组新建批次。
+
+```bash
+bash training/run_v3_experiments.sh --batch-dir runs/ddqn-v3-400k-20261126-144151-ctZsMf --start-from revisit
+```
+
+前四组按历史规则关闭死锁早停，依次运行固定 75% 简化开局、逐步降低简化开局比例、折返扣 0.02、折返扣 0.04。后三组启用死锁早停，比较常规棋盘扣 −1、常规棋盘扣 −10、小棋盘课程扣 −1。原来的 `ddqn-v2-standard-boards` 与 `ddqn-deadlock-neg1` 共享同一配置。比较相同训练预算时，可对照两版日志第 250,000 步的固定验证结果。
+
+新训练默认使用 v2，每个 Q 网络有 38,308 个参数。`--model-version 3` 选择 76,616 个参数的 v3。v3 在 32 通道主干和动作输出层之间增加三个残差块。第一个块先用 1×1 卷积将 32 通道压至 4，再用 3×3 卷积恢复到 32 通道。后两个块均为 32 通道，空洞率依次为 1 和 3。两个版本使用相同的四个移动动作、奖励和训练课程。
+
+下面的 v3 训练与上面的 v2 实验都使用默认训练种子 42。用种子 2027 评估相同的 1,000 个单箱开局，可逐关对照两个版本的通关、循环和死锁。
+
+```bash
+python -m training.train --device cuda --model-version 3 --steps 250000 --output runs/ddqn-v3
+python -m training.evaluate --device cuda --checkpoint runs/ddqn-v3/best.pt --generated 1000 --max-boxes 1 --seed 2027 --compare-random
+```
+
+### eps300k 单箱评估中的绕路与循环
+
+`ddqn-v3-deadlock-neg1-eps300k` 的 `best.pt` 来自第 380,000 步。在种子 2027 的 1,000 个单箱开局中，模型通关 835 局、循环 164 局、死锁 1 局。评估后用棋盘状态搜索检查每关是否存在一条解，使箱子到目标的曼哈顿距离在每次推动时都缩短。
+
+| 关卡条件 | 关数 | 通关 | 循环 | 死锁 |
+|---|---:|---:|---:|---:|
+| 任何解都必须暂时把箱子推远 | 23 | 3 | 19 | 1 |
+| 存在每次推动都靠近目标的解 | 977 | 832 | 145 | 0 |
+
+按模型实际动作统计，42 局曾把箱子推远，其中 21 局通关，21 局随后陷入循环。用同一权重重放的 164 个循环局与原 CUDA 记录的结局、步数和推数逐关一致。检查重放中从棋盘首次出现到再次出现的动作，156 局是两步折返，7 局循环四步，1 局循环十步。所有重复片段中箱子都停在原地。
+
 ### 对照死锁扣分
 
 下面两轮均从头训练，种子为 42，折返扣分为 0.02。死锁扣分分别为 −1 和 −10。
@@ -93,7 +127,7 @@ python -m training.train --device cuda --seed 42 --steps 250000 --revisit-penalt
 
 - **观测与动作。** 棋盘补墙到 10×10，四个通道分别表示墙、目标、箱子和角色当前位置。空间残差卷积网络输出上下左右四个 Q 值，采样和估值都使用同一组合法动作。每次决策可走一步，或者把紧邻的一个箱子推一格。每局默认最多移动 256 步。
 - **距离奖励。** 基础奖励为每步扣 0.01 分、归位箱数的净变化每箱 1 分、通关加 10 分。新版额外加上 `0.99 × Φ(后继局面) − Φ(当前局面)`。第一项是未归位箱子到最近空目标的曼哈顿距离之和除以全部箱数，第二项是角色到最近有利站位的曼哈顿距离。有利站位允许玩家向一个能缩短上述箱子到目标距离的方向推一步。两项距离上限均为 18，权重分别为 −0.10 和 −0.04。终止局面的 Φ 为零。该信号只参与训练奖励，网络仍自行决定每一步。
-- **折返扣分。** v2 训练时从开局的角色位置开始记录。普通走动每次踩回已记录的格子，额外扣除 `--revisit-penalty` 指定的分数，默认 0.02。设为 0 可关闭这项扣分。每次推箱后，从玩家的新位置重新记录。续训沿用检查点中的扣分值，旧 v2 检查点缺少该字段时采用 0.02。
+- **折返扣分。** v2 和 v3 训练时从开局的角色位置开始记录。普通走动每次踩回已记录的格子，额外扣除 `--revisit-penalty` 指定的分数，默认 0.02。设为 0 可关闭这项扣分。每次推箱后，从玩家的新位置重新记录。续训沿用检查点中的扣分值，旧 v2 检查点缺少该字段时采用 0.02。
 - **死锁判定与扣分。** 未归位的箱子进入两面固定墙形成的直角，或一个 2×2 区域被墙和箱子填满且含有未归位箱子，均判为死锁。训练把造成死锁的推动记为终止步，在该步奖励中加上 `--deadlock-penalty` 的值。该参数取非正有限数，默认 −1.0，设为 0 时仍会提前结束该局。
 - **更新。** 在线网络选定后继局面的最佳合法移动，目标网络给出该移动的估值。默认 16 个环境，经验池容量 50,000，预热 2,000 步后每 4 步更新一次，批量为 64。使用 Huber 损失、Adam（学习率 0.0003）、0.99 的折扣因子，每 500 次更新同步目标网络。
 - **单箱开局。** 前 50,000 步，新开局有 75% 的概率采用简化生成方式（用 1 至 2 次合法反向拉箱打乱），其余 25% 采用完整难度生成器。随后完整难度的概率按累计移动步数线性增加，在 125,000 步达到 50%，在 200,000 步达到 75%，此后保持 75%。日志中的 `full_start_probability` 表示此刻开始一局时使用完整生成器的概率。完整生成器也可能产生简单关卡。
@@ -114,7 +148,7 @@ python -m training.train --device cuda --seed 42 --steps 250000 --revisit-penalt
 python -m training.train --device cuda --resume runs/ddqn-v2-revisit/latest.pt --steps 500000
 ```
 
-`--steps` 是累计决策目标。恢复任意 v2 检查点后，下一局直接按已保存的累计步数取样。例如，从旧实验的 250,000 步单箱检查点续训时，新开局抽到完整生成器的概率为 75%。进行中的局沿用原棋盘，恢复时已确认死锁的局直接记为失败并开始下一局。经验池保留旧样本原有的奖励和终止标记。版本 1 检查点仍沿用原先按步数升级的课程。
+`--resume` 和评估命令都会从检查点自动识别 v1、v2 或 v3。`--steps` 是累计决策目标。恢复 v2 或 v3 检查点后，下一局直接按已保存的累计步数取样。例如，从旧实验的 250,000 步单箱检查点续训时，新开局抽到完整生成器的概率为 75%。进行中的局沿用原棋盘，恢复时已确认死锁的局直接记为失败并开始下一局。经验池保留旧样本原有的奖励和终止标记。版本 1 检查点仍沿用原先按步数升级的课程。
 
 新实验默认开启小棋盘课程，新检查点保存该开关，续训时按累计步数接续采样。缺少该配置的旧检查点继续使用原有的棋盘尺寸分布。
 
@@ -129,6 +163,7 @@ python -m training.train --device cuda --resume runs/ddqn-v2-revisit/latest.pt -
 | `start` | 启动时间（UTC）、设备、模型版本、训练配置、起始步数、目标步数和续训来源。 |
 | `train` | 累计步数、已结束的训练局数及胜负、更新次数、探索率、损失、最近 100 局胜率和吞吐量。 |
 | `validation` | 验证步数、各箱数的通关数和死锁局数（`deadlocks_by_boxes_1_to_4`）、每组关数、当前课程等级和最佳检查点步数。 |
+| `profile` | 启用性能分析时，记录实际采样的起止环境步和报告路径。 |
 
 每结束一局训练，通关计入 `episodes_won`，死锁、未通关且用尽步数或无合法动作计入 `episodes_lost`。`episodes_deadlocked` 统计这些失败局中确认死锁的局数，恢复缺少该字段的旧检查点时从本次恢复开始统计。仍在进行的局等到结束时再计数。每条训练记录都满足 `episodes = episodes_won + episodes_lost + episodes_unknown`。`latest.pt` 保存累计数供续训。新实验的 `episodes_unknown` 为 0。从旧检查点恢复时，根据其中最近最多 100 局的结果计入胜负，更早的局归入 `episodes_unknown`。
 
@@ -150,7 +185,30 @@ with open("runs/ddqn-v2-revisit/metrics.jsonl", encoding="utf-8") as log:
 
 ## A100 吞吐量
 
+给单次训练命令加 `--profile` 可以采集一次短窗口。下面从已完成 25 万步的 v2 检查点继续跑 512 个环境步，在独立目录里分析低探索率时的训练。第二条命令将 v3 批量实验的采样窗口改为从第 200,000 步开始的 32 轮。
+
+```bash
+python -m training.train --device cuda --resume runs/ddqn-v2-small-boards/latest.pt --steps 250512 --output runs/profile-v2-small-boards --profile
+bash training/run_v3_experiments.sh --profile-start 200000 --profile-rounds 32
+```
+
+`--profile-start` 指累计环境步，从包含该步的整批开始采样。如果续训已超过该步，就从恢复后的第一批开始。直接运行 `training.train --profile` 时，默认在预热并攒够首批更新所需样本后开始。目标步数更短时从第一批开始。`--profile-rounds` 默认 16，一轮包括最多 `--num-envs` 个环境步及其梯度更新。到达日志、验证、存档或训练结束时窗口提前关闭。报告中的探索率和更新次数能帮助区分主要靠随机动作的预热阶段和需要网络推理的阶段。
+
+每次采样会在实验目录的 `profiles/steps-*/` 生成 `summary.json` 和可用 Perfetto 打开的 `trace.json`。终端按主机耗时排序。先看 `host_ms.environment`（走棋、编码、重置环境）与 `host_ms.data_prep`（经验抽样、CPU 组批）。`host_ms.transfer` 包括发起传输和等动作返回的时间，`host_ms.train_compute` 包括主机调用前向、反向和优化器的时间。另看 `gpu.kernel_ms`（设备实际执行核函数的时间）和 `gpu.active_pct`（窗口内核函数、复制、置值的活动时间占比，重叠部分只计一次）。主机和 GPU 可同时工作，两组耗时应分别解读。CPU 训练或未采集到 CUDA 设备事件时 `gpu` 为 `null`。分析本身有开销，比较正常吞吐时使用采样窗口之外的日志。
+
 显存约 500 MB 和 GPU 利用率 36% 是单次采样。模型处理 10×10 棋盘，CPU 负责生成地图和执行每步动作，GPU 负责批量推理及梯度更新。用日志中的 `decisions_per_sec` 和 `updates_per_sec` 比较实际吞吐量，同时观察验证通关率。
+
+`--channels-last` 让 CUDA 卷积网络和输入采用通道连续的内存布局，目的是减少卷积前后的布局转换。训练默认使用原布局，每次续训可单独选择。下面从同一份 v3 检查点分别再跑 8,000 步，两组都沿用检查点中的 batch size 64。
+
+```bash
+checkpoint=runs/ddqn-v3-400k-20261126-144151-ctZsMf/revisit/latest.pt
+bench=$(mktemp -d runs/bench-v3-layout-XXXXXX)
+common=(--device cuda --resume "$checkpoint" --steps 408000)
+python -m training.train "${common[@]}" --output "$bench/contiguous" &&
+  python -m training.train "${common[@]}" --channels-last --output "$bench/channels-last"
+```
+
+将前 2,000 步作为预热，比较两份 `metrics.jsonl` 在 404,000、406,000 和 408,000 步记录的 `updates_per_sec` 和 `decisions_per_sec`。若要核实转换次数，可另建一批，在两条训练命令中都加入 `--profile --profile-start 402000`，再查看各自 `trace.json` 中的 `nchwToNhwcKernel` 和 `nhwcToNchwKernel`。`bash training/run_v3_experiments.sh --channels-last` 可给整批 v3 训练启用同一布局。
 
 以下两次短跑在全新的输出目录中进行，均以相同随机种子和训练批量运行，只改变每批环境数。预热后对照几个连续日志区间，比较累计决策和更新次数相同时的用时。
 
