@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f6ef">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23f3af65' stroke='%23263f35' stroke-width='2' d='M16 2 29 9v14l-13 7-13-7V9Zm0 14 13-7m-13 7L3 9m13 7v14'/%3E%3C/svg%3E">
+  <title>推箱子 · SOKOBAN</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="icon-crate" viewBox="0 0 32 32"><path d="m16 2 13 7v14l-13 7-13-7V9Z" fill="#f3af65" stroke="#263f35" stroke-width="2" stroke-linejoin="round"/><path d="m3 9 13 7 13-7M16 16v14M9 5.6l13 7.2M6.8 13l5.5 9.5m7 .1 6-8" fill="none" stroke="#263f35" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="icon-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="6" height="6" rx="1"/><rect x="14.5" y="3.5" width="6" height="6" rx="1"/><rect x="3.5" y="14.5" width="6" height="6" rx="1"/><rect x="14.5" y="14.5" width="6" height="6" rx="1"/></symbol>
+    <symbol id="icon-keys" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="3"/><path d="M6 9h1m3 0h1m3 0h1m3 0h.1M6 12h1m3 0h1m3 0h1m3 0h.1M8 15.5h8"/></symbol>
+    <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="m6 12 6-6 6 6m-6-6v13"/></symbol>
+    <symbol id="icon-left" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+    <symbol id="icon-right" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+    <symbol id="icon-undo" viewBox="0 0 24 24"><path d="m9 5-5 5 5 5m-5-5h9a6 6 0 0 1 0 12" transform="translate(0 -2)"/></symbol>
+    <symbol id="icon-reset" viewBox="0 0 24 24"><path d="M4 5v6h6M4.5 11A8 8 0 1 1 7 18"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="M7 4.5 20 12 7 19.5Z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 5 5 10-11"/></symbol>
+  </svg>
+  <header class="mast"><div class="wrap mast-inner">
+    <div class="brand"><svg aria-hidden="true"><use href="#icon-crate"/></svg>SOKOBAN</div>
+    <nav aria-label="游戏菜单">
+      <button class="menu-button" id="show-levels"><svg class="ico"><use href="#icon-grid"/></svg>关卡目录</button>
+      <button class="menu-button" id="show-help"><svg class="ico"><use href="#icon-keys"/></svg>玩法说明</button>
+    </nav>
+  </div></header>
+  <main class="wrap">
+    <div class="intro">
+      <div><h1>推箱子<span class="title-dot">.</span></h1><p>把每个木箱推到地面的目标点，即可通关。</p></div>
+      <div class="campaign"><div>通关进度 <span><b id="finished">00</b> / <span id="total">30</span></span></div><progress id="progress" max="30" value="0" aria-label="通关进度"></progress></div>
+    </div>
+    <div class="workspace">
+      <section class="board-panel panel" aria-labelledby="level-title">
+        <div class="board-head"><div class="level-heading"><span class="level-label">关卡 <b id="level-number">01</b></span><h2 id="level-title">载入中</h2></div><div class="level-nav">
+          <button class="icon-button" id="prev" aria-label="上一关"><svg class="ico"><use href="#icon-left"/></svg></button>
+          <button class="icon-button" id="next" aria-label="下一关"><svg class="ico"><use href="#icon-right"/></svg></button>
+        </div></div>
+        <div class="stage" id="stage"><canvas id="board" role="img" aria-label="推箱子棋盘"></canvas></div>
+        <div class="board-foot"><div class="legend"><span><i class="legend-box"></i>木箱</span><span><i class="legend-goal"></i>目标点</span><span><i class="legend-done"></i>已归位</span></div><span class="status" id="status" role="status">载入中</span></div>
+      </section>
+      <aside class="control-panel panel" aria-labelledby="control-heading">
+        <h2 id="control-heading">操作台</h2>
+        <div class="stats"><div><span>移动步数</span><strong id="moves">0</strong></div><div><span>归位木箱</span><strong id="packed">0 <small>/ 0</small></strong></div></div>
+        <div class="buttons"><button class="primary" id="auto"><svg class="ico"><use href="#icon-play"/></svg><span>机器演示</span></button><button class="primary" id="advance" hidden>进入下一关<svg class="ico"><use href="#icon-right"/></svg></button>
+        <div class="secondary-row"><button id="undo"><svg class="ico"><use href="#icon-undo"/></svg>撤销</button><button id="reset"><svg class="ico"><use href="#icon-reset"/></svg>重来</button></div></div>
+        <div class="pad-section"><h3>移动角色</h3><div class="pad" aria-label="方向键">
+          <button data-move="up" aria-label="向上"><svg class="ico"><use href="#icon-arrow"/></svg></button>
+          <button data-move="left" aria-label="向左"><svg class="ico"><use href="#icon-arrow"/></svg></button>
+          <button data-move="down" aria-label="向下"><svg class="ico"><use href="#icon-arrow"/></svg></button>
+          <button data-move="right" aria-label="向右"><svg class="ico"><use href="#icon-arrow"/></svg></button>
+        </div><p>也可使用方向键或 <kbd>WASD</kbd></p></div>
+      </aside>
+    </div>
+  </main>
+  <dialog id="levels-dialog" aria-labelledby="levels-heading"><div class="dialog-head"><h2 id="levels-heading">关卡目录</h2><button class="icon-button close" aria-label="关闭"><svg class="ico"><use href="#icon-x"/></svg></button></div><div id="level-list"></div></dialog>
+  <dialog id="help-dialog" aria-labelledby="help-heading"><div class="dialog-head"><h2 id="help-heading">玩法说明</h2><button class="icon-button close" aria-label="关闭"><svg class="ico"><use href="#icon-x"/></svg></button></div><p>推动木箱，让每个目标点都放上一个箱子。每次只能推动一个，箱子后面需要有空位。</p><dl><div><dt>移动</dt><dd><kbd>↑ ↓ ← →</kbd> 或 <kbd>WASD</kbd></dd></div><div><dt>撤销一步</dt><dd><kbd>Z</kbd></dd></div><div><dt>重新开始本关</dt><dd><kbd>R</kbd></dd></div><div><dt>停止机器演示</dt><dd><kbd>Esc</kbd></dd></div></dl><p>机器会从当前局面寻找解法。停下演示后，可以接着移动角色。</p></dialog>
+</body>
+</html>

@@ -1,0 +1,17 @@
+[project]
+name = "sokoban"
+version = "0.1.0"
+description = "支持键盘游玩和机器求解的 30 关推箱子游戏"
+readme = "README.md"
+authors = [
+    { name = "jiangt01", email = "sakana9632@163.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+sokoban = "sokoban:main"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
