@@ -49,6 +49,40 @@ def step_game(game: Game, action: int) -> float:
     return -0.01 + change + (10.0 if game.won else 0.0)
 
 
+def _manhattan(a: Point, b: Point) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def potential(game: Game) -> float:
+    """Estimate progress from local geometry, without tracing a path or choosing an action."""
+    if game.won:
+        return 0.0
+    open_goals = game.goals - game.boxes
+    max_distance = 2 * (SIDE - 1)
+    box_distance = 0
+    stand_distance = max_distance
+    for box in game.boxes - game.goals:
+        nearest = min(_manhattan(box, goal) for goal in open_goals)
+        box_distance += nearest
+        x, y = box
+        for dx, dy in DIRECTIONS.values():
+            stand = x - dx, y - dy
+            destination = x + dx, y + dy
+            if stand not in game.floor or stand in game.boxes:
+                continue
+            if destination not in game.floor or destination in game.boxes:
+                continue
+            if min(_manhattan(destination, goal) for goal in open_goals) < nearest:
+                stand_distance = min(stand_distance, _manhattan(game.player, stand))
+    average_distance = min(max_distance, box_distance / len(game.boxes))
+    return -0.10 * average_distance - 0.04 * stand_distance
+
+
+def shaped_reward(base_reward: float, before: float, after: float, terminal: bool, gamma: float) -> float:
+    """Use zero potential at true terminals and the actual successor at a time limit."""
+    return base_reward + gamma * (0.0 if terminal else after) - before
+
+
 def _reachable(start: Point, floor: set[Point], boxes: set[Point]) -> set[Point]:
     reached = {start}
     pending = [start]
@@ -78,10 +112,14 @@ def _pulls(boxes: set[Point], reached: set[Point]) -> list[tuple[Point, Point, P
     return options
 
 
-def make_training_game(rng: Random, max_boxes: int) -> Game:
+def make_training_game(rng: Random, max_boxes: int, *, max_extra_pulls: int | None = None) -> Game:
     """Return a solvable new room with 1..max_boxes boxes and no action labels."""
     if not 1 <= max_boxes <= 4:
         raise ValueError("max_boxes must be between 1 and 4")
+    if max_extra_pulls is None:
+        max_extra_pulls = 4 * max_boxes
+    if max_extra_pulls < 0:
+        raise ValueError("max_extra_pulls must be nonnegative")
     count = rng.randint(1, max_boxes)
     width = rng.randint(max(5, count + 3), SIDE)
     height = rng.randint(max(5, count + 3), SIDE)
@@ -104,7 +142,7 @@ def make_training_game(rng: Random, max_boxes: int) -> Game:
     goals = {anchor, *rng.sample(sorted(floor - reserved), count - 1)}
     boxes = (goals - {anchor}) | {first_stand}
     seen = {frozenset(goals), frozenset(boxes)}
-    for _ in range(rng.randint(0, 4 * max_boxes)):
+    for _ in range(rng.randint(0, max_extra_pulls)):
         reached = _reachable(player, floor, boxes)
         options = _pulls(boxes, reached)
         rng.shuffle(options)

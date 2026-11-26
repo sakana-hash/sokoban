@@ -3,11 +3,64 @@ import unittest
 from unittest.mock import patch
 
 from training.env import (
-    ACTIONS, AREA, SIDE, Game, _pulls, encode, legal_mask, make_training_game, step_game,
+    ACTIONS, AREA, SIDE, Game, _pulls, encode, legal_mask, make_training_game, potential,
+    shaped_reward, step_game,
 )
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_potential_rewards_walking_and_primitive_pushes(self):
+        from sokoban import load_level
+
+        gamma = 0.99
+        with patch("sokoban.solver.solve", side_effect=AssertionError("solver called")):
+            game = load_level(1)
+            initial = potential(game)
+            base = step_game(game, ACTIONS.index("right"))
+            after_push = potential(game)
+            self.assertEqual((game.moves, game.pushes), (1, 1))
+            self.assertGreater(shaped_reward(base, initial, after_push, game.won, gamma), base)
+            base = step_game(game, ACTIONS.index("right"))
+            self.assertTrue(game.won)
+            self.assertEqual(potential(game), 0.0)
+            self.assertAlmostEqual(shaped_reward(base, after_push, 0, True, gamma), base - after_push)
+
+            game = Game(("########", "#@  $ .#", "########"))
+            before = potential(game)
+            step_game(game, ACTIONS.index("right"))
+            self.assertEqual((game.moves, game.pushes), (1, 0))
+            self.assertGreater(potential(game), before)
+
+    def test_discounted_shaping_telescopes_on_a_closed_walk(self):
+        game = Game(("########", "#@  $ .#", "########"))
+        gamma = 0.99
+        start = potential(game)
+        step_game(game, ACTIONS.index("right"))
+        middle = potential(game)
+        step_game(game, ACTIONS.index("left"))
+        end = potential(game)
+        self.assertEqual(end, start)
+        outward = shaped_reward(0, start, middle, False, gamma)
+        inward = shaped_reward(0, middle, end, False, gamma)
+        self.assertAlmostEqual(outward + gamma * inward, gamma ** 2 * end - start)
+        self.assertEqual(shaped_reward(0, middle, -1, True, gamma), -middle)
+
+    def test_potential_is_bounded_with_no_eligible_standing_square(self):
+        game = Game(("#######", "#$ @ .#", "#######"))
+        self.assertAlmostEqual(potential(game), -0.1 * 4 - 0.04 * 18)
+
+    def test_initial_lesson_uses_exactly_one_reverse_displacement(self):
+        rng = random.Random(321)
+        for _ in range(50):
+            game = make_training_game(rng, 1, max_extra_pulls=0)
+            (x, y), = game.boxes
+            (gx, gy), = game.goals
+            self.assertEqual(abs(x - gx) + abs(y - gy), 1)
+        for limit in range(1, 5):
+            original = make_training_game(random.Random(7), limit)
+            explicit = make_training_game(random.Random(7), limit, max_extra_pulls=4 * limit)
+            self.assertEqual(encode(original), encode(explicit))
+
     def test_encoding_preserves_overlays_and_rectangular_padding(self):
         game = Game(("########", "#+*$ . #", "#  $   #", "########"))
         data = encode(game)

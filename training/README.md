@@ -1,6 +1,6 @@
 # 在 CUDA 服务器上训练 Double DQN
 
-模型从四个方向中选择动作，通过 `Game.move()` 试玩，按实际奖励学习。训练时程序随机生成关卡，内置 30 关留作独立评估。训练和评估全程都不调用求解器。浏览器里的「机器演示」仍使用游戏自带的搜索算法。
+新版 Double DQN 与旧版都使用上、下、左、右四个动作。网络每次选择一个合法方向，角色移动一格，相邻箱子可推动时随之移动一格。绕到箱子后面的每一步同样由网络决定。训练和评估都使用真实游戏规则，不调用求解器。训练地图随机生成，固定生成地图用于验证，内置 30 关用于独立评估。浏览器里的「机器演示」使用游戏自带的搜索算法。
 
 ## 服务器环境
 
@@ -15,7 +15,7 @@ python -c "import sys, torch; print(sys.version, torch.__version__, torch.versio
 df -h .
 ```
 
-设备名应包含 A100。首轮采用默认的 16 个采样环境、64 个样本的训练批量和 50,000 条经验的回放池。一个 Python 进程依次推进各环境，并把棋盘批量送入 GPU。训练、日志和评估均可在终端完成，6006 和 6008 端口可保持空闲。使用预装镜像时可以直接进入「验证与启动」。
+设备名应包含 A100。首轮采用默认的 16 个采样环境、64 个样本的训练批量和 50,000 条经验的回放池。一个 Python 进程依次推进各环境，并把棋盘批量送入 GPU。训练、日志和评估均可在终端完成，6006 和 6008 端口可保持空闲。使用预装镜像时可以直接评估旧权重或启动新训练。
 
 ### 从空白环境安装
 
@@ -34,39 +34,67 @@ python -m pip install -r training/requirements.txt 'torch==2.8.0' --index-url ht
 python -c "import torch; print(torch.__version__, torch.version.cuda); assert torch.cuda.is_available(), 'CUDA unavailable'; print(torch.cuda.get_device_name(0))"
 ```
 
-## 验证与启动
+## 用现有权重诊断短循环
 
-先运行训练目录的测试。其中端到端测试会用 CPU 做短训练、读取检查点续训、重新加载权重并试玩 30 关。接着用单独的输出目录跑一个短 CUDA 任务。按下面的参数，最后一行日志应显示 `steps=256`、`updates=49`，且 `loss` 是有限值。
+以下命令在同一批 200 个固定种子的单箱关卡上评估旧模型。程序自动识别版本 1 的四方向权重。每个开局都另跑一遍均匀随机合法动作，地图生成和随机动作使用独立的随机数流。可以对新权重重复同一条命令以复用地图。
+
+```bash
+python -m training.evaluate --device cuda --checkpoint training/runs/ddqn/policy.pt --generated 200 --max-boxes 1 --seed 2026 --compare-random
+```
+
+查看通关率、循环、超时和零次推动局数。每局默认最多让角色走 256 步，含绕到箱子背后的移动。确定性策略回到相同策略输入即记为循环。随机策略可以从重复局面走出，继续运行到通关、无动作或预算用尽。新旧模型和随机基线都只能选择当前合法的上下左右动作。相同种子和地图范围下，两次评估的随机基线应一致。
+
+## 训练新模型
+
+先运行测试，再用独立目录跑短 CUDA 任务。下列短测结束时应有 256 次决策和 49 次梯度更新。
 
 ```bash
 python -m unittest discover -s training/tests -v
-python -m training.train --device cuda --steps 256 --warmup 64 --batch-size 32 --output training/runs/smoke
+python -m training.train --device cuda --steps 256 --warmup 64 --batch-size 32 --output training/runs/smoke-v2
 ```
 
-以下命令训练 25 万步，随后让模型独立挑战内置 30 关。
+为新模型创建独立任务，直接从新权重开始，保留旧任务目录。新版采用新的网络结构和训练奖励，按当前设置重新训练。
 
 ```bash
-python -m training.train --device cuda --steps 250000 --output training/runs/ddqn
-python -m training.evaluate --checkpoint training/runs/ddqn/policy.pt --device cuda
+python -m training.train --device cuda --steps 250000 --output training/runs/ddqn-v2
+python -m training.evaluate --device cuda --checkpoint training/runs/ddqn-v2/best.pt --generated 200 --max-boxes 1 --seed 2026 --compare-random
+python -m training.evaluate --device cuda --checkpoint training/runs/ddqn-v2/best.pt --compare-random
 ```
 
-每个新任务使用独立的输出目录。日志中的 `steps` 是所有环境合计的动作数，`updates` 是梯度更新次数，`win_rate_last_100` 是最近至多 100 个已结束训练局的通关率，包含探索动作。评估使用固定权重和贪心策略，按关卡及箱子数量报告通关结果，同时区分循环、无可用动作和超时。25 万步是首轮实验预算，效果以实际评估为准。
+最后一条命令评估内置 30 关。也可以将生成地图命令中的 `--max-boxes` 改为 4，查看 1 到 4 箱的分组结果。25 万次决策是一次实验的预算，效果以相同地图和移动上限下的独立评估为准。
 
-## 保存与续训
+## 模型与课程
 
-默认每 25,000 个环境步以及训练结束时保存检查点。每个文件先写到同目录的临时文件，再原子替换。`policy.pt` 是评估用的网络权重，`latest.pt` 还保存目标网络、优化器、经验池、各环境的当前局面、随机数状态和训练计数。
+- **观测与动作。** 棋盘补墙到 10×10，四个通道分别表示墙、目标、箱子和角色当前位置。空间残差卷积网络输出上下左右四个 Q 值，采样和估值都使用同一组合法动作。每次决策可走一步，或者把紧邻的一个箱子推一格。每局默认最多移动 256 步。
+- **距离奖励。** 基础奖励为每步扣 0.01 分、归位箱数的净变化每箱 1 分、通关加 10 分。新版额外加上 `0.99 × Φ(后继局面) − Φ(当前局面)`。第一项是未归位箱子到最近空目标的曼哈顿距离之和除以全部箱数，第二项是角色到最近有利站位的曼哈顿距离。有利站位允许玩家向一个能缩短上述箱子到目标距离的方向推一步。两项距离上限均为 18，权重分别为 −0.10 和 −0.04。终止局面的 Φ 为零。该信号只参与训练奖励，网络仍自行决定每一步。
+- **更新。** 在线网络选定后继局面的最佳合法移动，目标网络给出该移动的估值。默认 16 个环境，经验池容量 50,000，预热 2,000 步后每 4 步更新一次，批量为 64。使用 Huber 损失、Adam（学习率 0.0003）、0.99 的折扣因子，每 500 次更新同步目标网络。
+- **开局与升难。** 单箱阶段，约 75% 的训练开局只用 1 至 2 次合法反向拉箱打乱，其余开局使用常规生成器。生成器只交付棋盘，角色走位和推箱都由训练策略逐步尝试。每 10,000 步在正常难度的固定地图上进行贪心验证，1、2、3、4 箱各 32 局，每局最多 256 步。已解锁的每一组均达到 75%（默认至少 24/32）才增加一个箱数等级。日志中的 `wins_by_boxes_1_to_4` 是各组验证胜局数，`win_rate_last_100` 是最近结束的训练局含探索的胜率。
+
+## 检查点与续训
+
+检查点在验证后、默认每 25,000 次决策和训练结束时写到任务目录。新版任务至少完成一次验证后才有 `best.pt`。
+
+| 文件 | 用途 |
+| --- | --- |
+| `best.pt` | 评估四组固定验证地图上总胜局数最高的一版权重，平分保留较早的权重。 |
+| `policy.pt` | 评估最近一次保存的在线网络。 |
+| `latest.pt` | 续训，恢复模型版本、网络、优化器、经验池、随机数状态、课程和采样中的局面。 |
 
 ```bash
-python -m training.train --device cuda --resume training/runs/ddqn/latest.pt --steps 500000
+python -m training.train --device cuda --resume training/runs/ddqn-v2/latest.pt --steps 500000
 ```
 
-`--steps` 始终指累计环境步数。续训从检查点恢复采样和学习参数，可用 `--save-every` 调整保存间隔。
+`--steps` 是累计决策目标。版本 1 的完整检查点同样可以续训，自动沿用原网络、原奖励及按步数升级的课程。例如 `python -m training.train --device cuda --resume training/runs/ddqn/latest.pt --steps 500000`。该命令继续旧实验。测量新版效果时使用上面的独立 `ddqn-v2` 任务。
 
-## 训练约定
+## A100 吞吐量
 
-- **输入与动作**　棋盘补墙到 10×10，四个通道依次表示墙、目标、箱子和玩家。卷积网络保留格子位置，输出上、下、左、右的 Q 值。随机探索、贪心决策和学习目标都只考虑当前能执行的动作。
-- **起始局面**　从箱子全部归位的棋盘随机反向拉箱，只保留打乱后的开局。每局的动作均由训练策略产生。默认先生成单箱关，每经过 50,000 步，新开局的箱子数上限增加一个，最多四个，简单关继续参与训练。
-- **奖励**　每步扣 0.01 分，已归位箱数的变化量按每箱 1 分计，全部归位另加 10 分。通关或没有可走方向时终止。每局默认最多 256 步，超时时从重置前的实际后继状态估计后续回报。
-- **Double DQN**　在线网络选择后继状态下的最佳合法动作，目标网络为这个动作估值。默认 16 个环境在 CPU 上轮流推进，网络批量推理。经验池保存最近 50,000 步，预热 2,000 步后每采集 4 步更新一次，批量为 64。使用 Huber 损失、Adam（学习率 0.0003）和 0.99 的折扣因子，每 500 次梯度更新同步一次目标网络。探索率在预热后用 150,000 步从 1.0 线性降到 0.05。
+显存约 500 MB 和 GPU 利用率 36% 是单次采样。模型处理 10×10 棋盘，CPU 负责生成地图和执行每步动作，GPU 负责批量推理及梯度更新。用日志中的 `decisions_per_sec` 和 `updates_per_sec` 比较实际吞吐量，同时观察验证通关率。
 
-运行 `python -m training.train --help` 查看可调参数。
+以下两次短跑在全新的输出目录中进行，均以相同随机种子和训练批量运行，只改变每批环境数。预热后对照几个连续日志区间，比较累计决策和更新次数相同时的用时。
+
+```bash
+python -m training.train --device cuda --steps 8192 --num-envs 16 --batch-size 64 --output training/runs/bench-16x64
+python -m training.train --device cuda --steps 8192 --num-envs 64 --batch-size 64 --output training/runs/bench-64x64
+```
+
+一次只改一个参数。若要比较批量 128，可固定环境数再建独立任务。更大批量会同时改变梯度样本数，训练效果仍需用固定地图评估。运行 `python -m training.train --help` 查看可调参数。
