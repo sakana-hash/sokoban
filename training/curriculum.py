@@ -1,8 +1,16 @@
-"""Fixed generated validation boards for deciding when to add another box."""
+"""Training start probabilities and validation for the box-count curriculum."""
 
 from random import Random
 
 from .env import make_training_game
+
+
+def single_box_easy_probability(steps: int) -> float:
+    """Hold the opening mix for 50k moves, then fade it to 25% easy by 200k."""
+    if steps <= 50_000:
+        return 0.75
+    progress = min(1.0, (steps - 50_000) / 150_000)
+    return 0.75 - 0.50 * progress
 
 
 def validation_games(per_box_count: int):

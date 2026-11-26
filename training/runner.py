@@ -10,7 +10,7 @@ from time import perf_counter
 
 import torch
 
-from .curriculum import next_stage, validation_games
+from .curriculum import next_stage, single_box_easy_probability, validation_games
 from .dqn import ReplayBuffer, make_network, mask_batch, optimize, state_batch
 from .env import Game, encode, legal_mask, make_training_game, potential, shaped_reward, step_game
 from .evaluate import play_batch
@@ -63,7 +63,7 @@ class Trainer:
         extra_pulls = None
         if self.version == 1:
             self.stage = min(4, 1 + self.steps // self.config.curriculum_steps)
-        elif self.stage == 1 and self.rng.random() < 0.75:
+        elif self.stage == 1 and self.rng.random() < single_box_easy_probability(self.steps):
             extra_pulls = 1
         game = make_training_game(self.rng, self.stage, max_extra_pulls=extra_pulls)
         return Episode(game, self.version)
@@ -200,6 +200,8 @@ class Trainer:
         print(json.dumps({
             "steps": self.steps, "updates": self.updates, "episodes": self.episodes,
             "epsilon": round(self.epsilon(), 4), "loss": loss, "training_max_boxes": self.stage,
+            "full_start_probability": round(1 - single_box_easy_probability(self.steps), 4)
+            if self.version == 2 and self.stage == 1 else 1.0,
             "decisions_per_sec": round((self.steps - old_steps) / (now - then), 1),
             "updates_per_sec": round((self.updates - old_updates) / (now - then), 1),
             "win_rate_last_100": rate,

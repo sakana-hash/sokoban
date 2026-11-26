@@ -1,11 +1,19 @@
 import unittest
 from collections import Counter
 
-from training.curriculum import next_stage, validation_games
+from training.curriculum import next_stage, single_box_easy_probability, validation_games
 from training.env import encode
 
 
 class CurriculumTests(unittest.TestCase):
+    def test_single_box_mix_holds_then_tapers_linearly(self):
+        for steps, expected in (
+            (0, 0.75), (50_000, 0.75), (125_000, 0.5),
+            (200_000, 0.25), (1_000_000, 0.25),
+        ):
+            with self.subTest(steps=steps):
+                self.assertAlmostEqual(single_box_easy_probability(steps), expected)
+
     def test_validation_is_repeatable_and_balanced(self):
         first = [(n, encode(game)) for n, game in validation_games(5)]
         second = [(len(game.boxes), encode(game)) for _, game in validation_games(5)]
