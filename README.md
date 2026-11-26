@@ -49,3 +49,7 @@ python3.12 -m unittest discover -s tests
 ```
 
 测试逐关求解并回放全部动作，也检查受阻移动、撤销和从中途局面接手求解。
+
+## 训练神经网络
+
+独立的 Double DQN 训练程序使用随机生成的关卡自主试玩，支持 CUDA 训练、断点续训和内置 30 关评估。服务器安装和运行步骤见 [训练说明](training/README.md)。

@@ -2,7 +2,6 @@
 
 from .engine import Game
 from .levels import LEVELS
-from .solver import solve
 
 __all__ = ["Game", "LEVELS", "load_level", "solve"]
 
@@ -12,6 +11,13 @@ def load_level(level: int = 1) -> Game:
     if type(level) is not int or not 1 <= level <= len(LEVELS):
         raise ValueError(f"关卡编号须为 1 到 {len(LEVELS)} 之间的整数")
     return Game(LEVELS[level - 1][1])
+
+
+def solve(game: Game) -> list[str] | None:
+    """Load the search implementation only when a caller requests a solution."""
+    from .solver import solve as solve_position
+
+    return solve_position(game)
 
 
 def main() -> None:
