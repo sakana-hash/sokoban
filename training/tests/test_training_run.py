@@ -65,7 +65,9 @@ class TrainingRunTest(unittest.TestCase):
             error = self.run_cli("training.train", "--resume", latest, "--steps", "12",
                                  "--revisit-penalty", "0.02", expected_code=1)
             self.assertIn("revisit_penalty", error)
-            self.run_cli("training.train", "--resume", latest, "--steps", "12")
+            reports = output / "evaluations"
+            self.assertEqual(list(reports.glob("*.json")), [])
+            console = self.run_cli("training.train", "--resume", latest, "--steps", "12", "--eval-after-train")
             lines = metrics.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[:len(first_lines)], first_lines)
             restart, train, validation = map(json.loads, lines[len(first_lines):])
@@ -76,6 +78,7 @@ class TrainingRunTest(unittest.TestCase):
             self.assertEqual((train["steps"], validation["validation_steps"]), (12, 12))
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["steps"], 12)
+            self.assertIs(resumed["config"]["small_board_curriculum"], True)
             self.assertGreater(resumed["updates"], initial["updates"])
             self.assertEqual(len(resumed["replay"]["items"]), 12)
             self.assertEqual(resumed["replay"]["items"][:8], experience)
@@ -84,10 +87,13 @@ class TrainingRunTest(unittest.TestCase):
                 for key, value in initial["online"].items()
             ))
 
-            report = self.run_cli(
-                "training.evaluate", "--checkpoint", output / "best.pt", "--max-steps", "2",
-            )
-            self.assertRegex(report, r"总通关 \d+/30")
+            self.assertRegex(console, r"总通关 \d+/30")
+            report_path, = reports.glob("*.json")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["checkpoint"], "best.pt")
+            self.assertEqual(report["checkpoint_steps"], validation["best_validation_step"])
+            self.assertEqual((report["source"], report["seed"], report["max_steps"]), ("builtin", 2026, 256))
+            self.assertFalse(report["compare_random"])
 
     def test_v1_walk_weights_evaluate_and_full_checkpoint_resumes(self):
         import torch
@@ -132,10 +138,16 @@ class TrainingRunTest(unittest.TestCase):
                 "training.evaluate", "--checkpoint", policy_path, "--generated", "1", "--max-steps", "2",
             )
             self.assertRegex(report, r"总通关 \d+/1")
-            self.run_cli("training.train", "--resume", latest, "--steps", "4")
+            reports = output / "evaluations"
+            before = set(reports.glob("*.json"))
+            self.run_cli("training.train", "--resume", latest, "--steps", "4", "--eval-after-train")
+            new_path, = set(reports.glob("*.json")) - before
+            campaign = json.loads(new_path.read_text(encoding="utf-8"))
+            self.assertEqual((campaign["checkpoint"], campaign["checkpoint_steps"]), ("policy.pt", 4))
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["version"], 1)
             self.assertEqual(resumed["config"]["revisit_penalty"], 0.02)
+            self.assertIs(resumed["config"]["small_board_curriculum"], False)
             self.assertEqual(resumed["steps"], 4)
             self.assertGreater(resumed["updates"], 0)
 

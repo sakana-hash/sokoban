@@ -31,6 +31,17 @@ class EvaluationTests(unittest.TestCase):
             for policy, field in [("model", "deadlocks"), ("random", "random_deadlocks")]:
                 count = sum(row[policy]["outcome"] == "死锁" for row in paired["levels"])
                 self.assertEqual(paired["summary"][field], count)
+            groups = {"small": [], "large": []}
+            boards = evaluation_boards(args.generated, args.max_boxes, args.seed)
+            for row, (_, rows) in zip(paired["levels"], boards, strict=True):
+                width, height = len(rows[0]), len(rows)
+                self.assertEqual((row["width"], row["height"]), (width, height))
+                groups["small" if max(width, height) <= 7 else "large"].append(row)
+            for name, group in groups.items():
+                self.assertEqual(paired["by_board_size"][name], {
+                    "attempts": len(group), "wins": sum(row["model"]["outcome"] == "通关" for row in group),
+                    "random_wins": sum(row["random"]["outcome"] == "通关" for row in group),
+                })
 
             args.compare_random = False
             run_evaluation(args, greedy, "cpu", 2, None)
@@ -39,6 +50,7 @@ class EvaluationTests(unittest.TestCase):
             self.assertIsNone(solo["checkpoint_steps"])
             self.assertNotIn("random_wins", solo["summary"])
             self.assertNotIn("random_deadlocks", solo["summary"])
+            self.assertTrue(all("random_wins" not in group for group in solo["by_board_size"].values()))
             self.assertTrue(all("random" not in row for row in solo["levels"]))
             self.assertEqual([row["model"] for row in solo["levels"]], [row["model"] for row in paired["levels"]])
             self.assertEqual(json.loads(first.read_text(encoding="utf-8")), paired)

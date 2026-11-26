@@ -2,7 +2,9 @@
 
 from random import Random
 
-from .env import make_training_game
+from .env import SIDE, Game, make_training_game
+
+SMALL_BOARD_MAX_SIDE = 7
 
 
 def single_box_easy_probability(steps: int) -> float:
@@ -11,6 +13,22 @@ def single_box_easy_probability(steps: int) -> float:
         return 0.75
     progress = min(1.0, (steps - 50_000) / 150_000)
     return 0.75 - 0.50 * progress
+
+
+def single_box_small_board_probability(steps: int) -> float:
+    """Probability of restricting both dimensions to 5–7 for a new single-box room."""
+    if steps <= 50_000:
+        return 0.75
+    return 0.75 * max(0, 150_000 - steps) / 100_000
+
+
+def make_single_box_game(rng: Random, steps: int, *, small_board_curriculum: bool) -> Game:
+    extra_pulls = 1 if rng.random() < single_box_easy_probability(steps) else None
+    probability = single_box_small_board_probability(steps) if small_board_curriculum else 0.0
+    max_side = SIDE
+    if probability > 0 and rng.random() < probability:
+        max_side = SMALL_BOARD_MAX_SIDE
+    return make_training_game(rng, 1, max_extra_pulls=extra_pulls, max_side=max_side)
 
 
 def validation_games(per_box_count: int):

@@ -23,6 +23,7 @@ class Config:
     validation_rooms: int = 32
     revisit_penalty: float = DEFAULT_REVISIT_PENALTY
     deadlock_penalty: float = -1.0
+    small_board_curriculum: bool = True
 
 
 def main() -> None:
@@ -32,10 +33,14 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help=f"新任务默认保存到项目根目录下的 {DEFAULT_OUTPUT}")
     parser.add_argument("--resume", type=Path, help="从完整的 latest.pt 恢复")
     parser.add_argument("--save-every", type=int, default=25_000, help="每多少个环境步保存一次")
+    parser.add_argument("--eval-after-train", action="store_true",
+                        help="训练完成后用默认参数评估 best.pt，尚无最佳权重时使用 policy.pt")
     parser.add_argument("--revisit-penalty", type=float,
                         help=f"v2 训练中每次折返的额外扣分，默认 {DEFAULT_REVISIT_PENALTY}，0 表示关闭")
     parser.add_argument("--deadlock-penalty", type=float,
                         help=f"推入死锁时加到奖励上的值，默认 {Config.deadlock_penalty}，设为 0 仍结束该局")
+    parser.add_argument("--small-board-curriculum", action=argparse.BooleanOptionalAction, default=None,
+                        help="单箱训练前期优先抽取 5–7 格棋盘，新训练默认开启")
     options = {
         "seed": "随机种子",
         "num_envs": "每轮同时采样的环境数",
@@ -80,7 +85,8 @@ def main() -> None:
                 raise ValueError("续训需要完整的 latest.pt 检查点")
             if args.steps <= checkpoint["steps"]:
                 raise ValueError(f"--steps 应大于已完成的 {checkpoint['steps']} 步")
-            config = Config(**checkpoint["config"])
+            # Earlier runs sampled regular board sizes throughout training.
+            config = Config(**({"small_board_curriculum": False} | checkpoint["config"]))
             output = args.output or args.resume.parent
 
         values = asdict(config)
@@ -95,7 +101,12 @@ def main() -> None:
             raise ValueError("环境数、训练批量、经验池和步数参数均须为正整数")
         if config.warmup < 0 or config.batch_size > config.replay_size:
             raise ValueError("预热步数不能为负，经验池须能容纳一个训练批量")
-        run(config, device, args.steps, args.save_every, output, checkpoint, args.resume)
+        policy_path = run(config, device, args.steps, args.save_every, output, checkpoint, args.resume)
+        if args.eval_after_train:
+            from .evaluate import main as evaluate
+
+            print(f"训练完成，使用 {policy_path} 运行默认评估", flush=True)
+            evaluate(["--checkpoint", str(policy_path)])
     except (OSError, ValueError) as error:
         parser.exit(1, f"{error}\n")
 

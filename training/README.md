@@ -65,12 +65,20 @@ python -m training.train --device cuda --steps 256 --warmup 64 --batch-size 32 -
 以下示例在新目录从头训练 25 万步，并在种子 2027 的 1,000 个单箱开局上统计通关、死锁、循环和零推动局数。
 
 ```bash
-python -m training.train --device cuda --steps 250000 --output runs/ddqn-v2-revisit
-python -m training.evaluate --device cuda --checkpoint runs/ddqn-v2-revisit/best.pt --generated 1000 --max-boxes 1 --seed 2027 --compare-random
-python -m training.evaluate --device cuda --checkpoint runs/ddqn-v2-revisit/best.pt --compare-random
+python -m training.train --device cuda --steps 250000 --output runs/ddqn-v2-small-boards
+python -m training.evaluate --device cuda --checkpoint runs/ddqn-v2-small-boards/best.pt --generated 1000 --max-boxes 1 --seed 2027 --compare-random
+python -m training.evaluate --device cuda --checkpoint runs/ddqn-v2-small-boards/best.pt --compare-random
 ```
 
 最后一条命令评估内置 30 关。也可以将生成地图命令中的 `--max-boxes` 改为 4，查看 1 到 4 箱的分组结果。25 万次决策是一次实验的预算，效果以相同地图和移动上限下的独立评估为准。
+
+做尺寸课程对照时，用相同训练种子再从头跑一轮，并用上面的评估命令比较两个目录下的 `best.pt`。生成单箱评估会分别报告长边 5–7 格和 8–10 格的通关率，可以直接比较两组模型在较大棋盘上的表现。
+
+```bash
+python -m training.train --device cuda --steps 250000 --no-small-board-curriculum --output runs/ddqn-v2-standard-boards
+```
+
+在训练或续训命令末尾加 `--eval-after-train`，即可在最后一次保存后自动运行一次 `training.evaluate`。优先使用 `best.pt`，尚无最佳权重时使用 `policy.pt`。评估脚本默认自动选择设备，评估内置 30 关，每关最多 256 步，种子为 2026，随机基线默认关闭。报告写入本次实验的 `evaluations/` 目录。
 
 ### 对照死锁扣分
 
@@ -89,6 +97,7 @@ python -m training.train --device cuda --seed 42 --steps 250000 --revisit-penalt
 - **死锁判定与扣分。** 未归位的箱子进入两面固定墙形成的直角，或一个 2×2 区域被墙和箱子填满且含有未归位箱子，均判为死锁。训练把造成死锁的推动记为终止步，在该步奖励中加上 `--deadlock-penalty` 的值。该参数取非正有限数，默认 −1.0，设为 0 时仍会提前结束该局。
 - **更新。** 在线网络选定后继局面的最佳合法移动，目标网络给出该移动的估值。默认 16 个环境，经验池容量 50,000，预热 2,000 步后每 4 步更新一次，批量为 64。使用 Huber 损失、Adam（学习率 0.0003）、0.99 的折扣因子，每 500 次更新同步目标网络。
 - **单箱开局。** 前 50,000 步，新开局有 75% 的概率采用简化生成方式（用 1 至 2 次合法反向拉箱打乱），其余 25% 采用完整难度生成器。随后完整难度的概率按累计移动步数线性增加，在 125,000 步达到 50%，在 200,000 步达到 75%，此后保持 75%。日志中的 `full_start_probability` 表示此刻开始一局时使用完整生成器的概率。完整生成器也可能产生简单关卡。
+- **单箱棋盘尺寸。** 单箱训练阶段的前 50,000 步，每次开局有 75% 的概率从 5–7 格独立抽取宽和高（含外墙），其余 25% 按常规范围 5–10 格抽取，两种范围都可能抽到小图。日志中的 `small_board_probability` 表示主动限定在 5–7 格的概率。该值随后线性下降，在 100,000 步为 37.5%，从 150,000 步起全部采用常规范围。尺寸与开局简化程度独立抽样。多箱训练、固定验证和独立评估均沿用各自原有的棋盘尺寸。
 - **升难。** 每 10,000 步在完整难度的固定地图上进行贪心验证，1、2、3、4 箱各 32 局，每局最多 256 步。已解锁的每一组均达到 75%（默认至少 24/32）才增加一个箱数等级。升入多箱阶段后全部新开局都使用常规生成器。日志中的 `wins_by_boxes_1_to_4` 是各组验证胜局数，`win_rate_last_100` 是最近结束的训练局含探索的胜率。
 
 ## 检查点与续训
@@ -106,6 +115,8 @@ python -m training.train --device cuda --resume runs/ddqn-v2-revisit/latest.pt -
 ```
 
 `--steps` 是累计决策目标。恢复任意 v2 检查点后，下一局直接按已保存的累计步数取样。例如，从旧实验的 250,000 步单箱检查点续训时，新开局抽到完整生成器的概率为 75%。进行中的局沿用原棋盘，恢复时已确认死锁的局直接记为失败并开始下一局。经验池保留旧样本原有的奖励和终止标记。版本 1 检查点仍沿用原先按步数升级的课程。
+
+新实验默认开启小棋盘课程，新检查点保存该开关，续训时按累计步数接续采样。缺少该配置的旧检查点继续使用原有的棋盘尺寸分布。
 
 新版 `latest.pt` 会保存每局自上次推箱以来走过的格子。恢复缺少这项记录的旧 v2 检查点时，各局从恢复时角色所在的格子开始记录，经验池中的样本保留采样时的奖励。
 

@@ -12,7 +12,10 @@ from time import perf_counter
 
 import torch
 
-from .curriculum import next_stage, single_box_easy_probability, validation_games
+from .curriculum import (
+    make_single_box_game, next_stage, single_box_easy_probability, single_box_small_board_probability,
+    validation_games,
+)
 from .dqn import ReplayBuffer, make_network, mask_batch, optimize, state_batch
 from .env import (
     Game, Point, encode, is_deadlocked, legal_mask, make_training_game, potential,
@@ -74,12 +77,14 @@ class Trainer:
         self.last_log = (perf_counter(), self.steps, self.updates)
 
     def new_episode(self):
-        extra_pulls = None
         if self.version == 1:
             self.stage = min(4, 1 + self.steps // self.config.curriculum_steps)
-        elif self.stage == 1 and self.rng.random() < single_box_easy_probability(self.steps):
-            extra_pulls = 1
-        game = make_training_game(self.rng, self.stage, max_extra_pulls=extra_pulls)
+        if self.version == 2 and self.stage == 1:
+            game = make_single_box_game(
+                self.rng, self.steps, small_board_curriculum=self.config.small_board_curriculum,
+            )
+        else:
+            game = make_training_game(self.rng, self.stage)
         return Episode(game, self.version)
 
     def epsilon(self):
@@ -248,11 +253,14 @@ class Trainer:
         then, old_steps, old_updates = self.last_log
         now = perf_counter()
         self.last_log = (now, self.steps, self.updates)
+        single_box_stage = self.version == 2 and self.stage == 1
         return {
             "steps": self.steps, "updates": self.updates, **self.episode_counts(),
             "epsilon": round(self.epsilon(), 4), "loss": loss, "training_max_boxes": self.stage,
             "full_start_probability": round(1 - single_box_easy_probability(self.steps), 4)
-            if self.version == 2 and self.stage == 1 else 1.0,
+            if single_box_stage else 1.0,
+            "small_board_probability": round(single_box_small_board_probability(self.steps), 4)
+            if single_box_stage and self.config.small_board_curriculum else 0.0,
             "decisions_per_sec": round((self.steps - old_steps) / (now - then), 1),
             "updates_per_sec": round((self.updates - old_updates) / (now - then), 1),
             "win_rate_last_100": rate,
@@ -269,7 +277,7 @@ def atomic_save(payload, path):
         temporary.unlink(missing_ok=True)
 
 
-def run(config, device, goal, save_every, output, checkpoint, resume):
+def run(config, device, goal, save_every, output, checkpoint, resume) -> Path:
     # A fresh run owns a new directory. A resumed run may continue in its own directory.
     continuing = resume is not None and output.resolve() == resume.resolve().parent
     output.mkdir(parents=True, exist_ok=continuing)
@@ -300,3 +308,4 @@ def run(config, device, goal, save_every, output, checkpoint, resume):
                 record("validation", trainer.validate())
             if validation_due or trainer.steps // save_every != before // save_every or trainer.steps == goal:
                 trainer.save(output)
+    return output / ("best.pt" if trainer.best_policy is not None else "policy.pt")

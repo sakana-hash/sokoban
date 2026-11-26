@@ -156,17 +156,22 @@ def _pulls(boxes: set[Point], reached: set[Point]) -> list[tuple[Point, Point, P
     return options
 
 
-def make_training_game(rng: Random, max_boxes: int, *, max_extra_pulls: int | None = None) -> Game:
+def make_training_game(
+    rng: Random, max_boxes: int, *, max_extra_pulls: int | None = None, max_side: int = SIDE,
+) -> Game:
     """Return a solvable new room with 1..max_boxes boxes and no action labels."""
     if not 1 <= max_boxes <= 4:
         raise ValueError("max_boxes must be between 1 and 4")
+    required_side = max(5, max_boxes + 3)
+    if not required_side <= max_side <= SIDE:
+        raise ValueError(f"max_side must be between {required_side} and {SIDE}")
     if max_extra_pulls is None:
         max_extra_pulls = 4 * max_boxes
     if max_extra_pulls < 0:
         raise ValueError("max_extra_pulls must be nonnegative")
     count = rng.randint(1, max_boxes)
-    width = rng.randint(max(5, count + 3), SIDE)
-    height = rng.randint(max(5, count + 3), SIDE)
+    width = rng.randint(max(5, count + 3), max_side)
+    height = rng.randint(max(5, count + 3), max_side)
     floor = {(x, y) for y in range(1, height - 1) for x in range(1, width - 1)}
 
     # Reserve three consecutive cells to guarantee at least one legal pull.
