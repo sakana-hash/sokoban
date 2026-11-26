@@ -11,3 +11,6 @@ wheels/
 
 # idea
 .idea
+
+# Local training checkpoints
+/runs/

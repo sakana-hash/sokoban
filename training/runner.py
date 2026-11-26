@@ -3,7 +3,9 @@
 import json
 import random
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import perf_counter
@@ -12,7 +14,7 @@ import torch
 
 from .curriculum import next_stage, single_box_easy_probability, validation_games
 from .dqn import ReplayBuffer, make_network, mask_batch, optimize, state_batch
-from .env import Game, encode, legal_mask, make_training_game, potential, shaped_reward, step_game
+from .env import Game, Point, encode, legal_mask, make_training_game, potential, shaped_reward, step_game
 from .evaluate import play_batch
 from .runtime import checkpoint_version
 
@@ -21,15 +23,21 @@ DISCOUNT = 0.99
 
 
 class Episode:
-    def __init__(self, game: Game, version: int, length: int = 0):
+    def __init__(
+        self, game: Game, version: int, length: int = 0, visited_since_push: Iterable[Point] = (),
+    ):
         self.game = game
         self.length = length
         self.state = encode(game)
         self.mask = legal_mask(game)
         self.potential = potential(game) if version == 2 else 0.0
+        self.visited_since_push = {game.player, *visited_since_push} if version == 2 else None
 
     def snapshot(self) -> dict:
-        return {"board": self.game.observation()["board"], "length": self.length}
+        snapshot = {"board": self.game.observation()["board"], "length": self.length}
+        if self.visited_since_push is not None:
+            snapshot["visited_since_push"] = sorted(self.visited_since_push)
+        return snapshot
 
 
 class Trainer:
@@ -99,7 +107,7 @@ class Trainer:
         before = self.steps
         for i, (slot, action) in enumerate(zip(slots, self.actions(slots))):
             previous = slot.state
-            reward = step_game(slot.game, action)
+            reward = step_game(slot.game, action, slot.visited_since_push)
             slot.length += 1
             slot.state = encode(slot.game)
             slot.mask = legal_mask(slot.game)
@@ -144,10 +152,10 @@ class Trainer:
                 key: value.detach().to("cpu", copy=True) for key, value in self.online.state_dict().items()
             }
         self.stage = next_stage(self.stage, wins, per_count)
-        print(json.dumps({
+        return {
             "validation_steps": self.steps, "wins_by_boxes_1_to_4": wins, "rooms_per_group": per_count,
             "training_max_boxes": self.stage, "best_validation_step": self.best_policy["steps"],
-        }), flush=True)
+        }
 
     def loss_value(self):
         return float(self.last_loss) if self.last_loss is not None else None
@@ -187,17 +195,20 @@ class Trainer:
         self.recent_wins.extend(checkpoint["recent_wins"])
         self.stage = checkpoint.get("stage", min(4, 1 + self.steps // self.config.curriculum_steps))
         self.best_policy = checkpoint.get("best_policy")
-        self.slots = [Episode(Game(s["board"]), self.version, s["length"]) for s in checkpoint["slots"]]
+        self.slots = [
+            Episode(Game(s["board"]), self.version, s["length"], s.get("visited_since_push", ()))
+            for s in checkpoint["slots"]
+        ]
         self.rng.setstate(checkpoint["rng"])
         torch.set_rng_state(checkpoint["torch_rng"])
 
-    def log(self):
+    def training_metrics(self):
         rate = sum(self.recent_wins) / len(self.recent_wins) if self.recent_wins else None
         loss = self.loss_value()
         then, old_steps, old_updates = self.last_log
         now = perf_counter()
         self.last_log = (now, self.steps, self.updates)
-        print(json.dumps({
+        return {
             "steps": self.steps, "updates": self.updates, "episodes": self.episodes,
             "epsilon": round(self.epsilon(), 4), "loss": loss, "training_max_boxes": self.stage,
             "full_start_probability": round(1 - single_box_easy_probability(self.steps), 4)
@@ -205,7 +216,7 @@ class Trainer:
             "decisions_per_sec": round((self.steps - old_steps) / (now - then), 1),
             "updates_per_sec": round((self.updates - old_updates) / (now - then), 1),
             "win_rate_last_100": rate,
-        }), flush=True)
+        }
 
 
 def atomic_save(payload, path):
@@ -226,15 +237,26 @@ def run(config, device, goal, save_every, output, checkpoint, resume):
     if checkpoint is not None:
         # Drop the loaded replay snapshot so evicted samples can be reclaimed.
         checkpoint.clear()
-    print(f"device={device}  version={trainer.version}  steps={trainer.steps}→{goal}  output={output}", flush=True)
-    while trainer.steps < goal:
-        before = trainer.steps
-        trainer.advance(min(config.num_envs, goal - before))
-        if trainer.steps // 2000 != before // 2000 or trainer.steps == goal:
-            trainer.log()
-        crossed_validation_interval = trainer.steps // config.curriculum_steps != before // config.curriculum_steps
-        validation_due = trainer.version == 2 and crossed_validation_interval
-        if validation_due:
-            trainer.validate()
-        if validation_due or trainer.steps // save_every != before // save_every or trainer.steps == goal:
-            trainer.save(output)
+    with (output / "metrics.jsonl").open("a", encoding="utf-8") as history:
+        def record(event: str, values: dict, message: str | None = None):
+            entry = {"event": event, "timestamp": datetime.now(UTC).isoformat(), **values}
+            history.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            history.flush()
+            print(message if message is not None else json.dumps(values), flush=True)
+
+        record("start", {
+            "device": str(device), "version": trainer.version, "steps": trainer.steps,
+            "target_steps": goal, "save_every": save_every, "config": asdict(config),
+            "resume": str(resume) if resume is not None else None, "output": str(output),
+        }, f"device={device}  version={trainer.version}  steps={trainer.steps}→{goal}  output={output}")
+        while trainer.steps < goal:
+            before = trainer.steps
+            trainer.advance(min(config.num_envs, goal - before))
+            if trainer.steps // 2000 != before // 2000 or trainer.steps == goal:
+                record("train", trainer.training_metrics())
+            crossed_validation_interval = trainer.steps // config.curriculum_steps != before // config.curriculum_steps
+            validation_due = trainer.version == 2 and crossed_validation_interval
+            if validation_due:
+                record("validation", trainer.validate())
+            if validation_due or trainer.steps // save_every != before // save_every or trainer.steps == goal:
+                trainer.save(output)

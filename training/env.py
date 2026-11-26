@@ -38,15 +38,23 @@ def legal_mask(game: Game) -> tuple[bool, ...]:
     return tuple(action in legal for action in ACTIONS)
 
 
-def step_game(game: Game, action: int) -> float:
-    """Advance one legal move and reward the change in the number of filled goals."""
+def step_game(game: Game, action: int, visited_since_push: set[Point] | None = None) -> float:
+    """Advance one legal move, optionally tracking revisits between pushes."""
     if not 0 <= action < len(ACTIONS):
         raise ValueError(f"invalid action index {action}")
     previous = len(game.boxes & game.goals)
+    pushes_before = game.pushes
     if not game.move(ACTIONS[action]):
         raise ValueError(f"blocked action {ACTIONS[action]}")
     change = len(game.boxes & game.goals) - previous
-    return -0.01 + change + (10.0 if game.won else 0.0)
+    reward = -0.01 + change + (10.0 if game.won else 0.0)
+    if visited_since_push is not None:
+        if game.pushes != pushes_before:
+            visited_since_push.clear()
+        elif game.player in visited_since_push:
+            reward -= 0.02
+        visited_since_push.add(game.player)
+    return reward
 
 
 def _manhattan(a: Point, b: Point) -> int:

@@ -1,10 +1,13 @@
 """Benchmark a frozen Double DQN and a matched random policy on reproducible boards."""
 
 import argparse
+import json
 import random
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .env import encode, legal_mask, make_training_game, step_game
 from sokoban import Game, LEVELS
@@ -80,6 +83,21 @@ def evaluation_boards(
             yield f"生成关 {index}", game.observation()["board"]
 
 
+def save_report(checkpoint: Path, report: dict) -> Path:
+    directory = checkpoint.parent / "evaluations"
+    directory.mkdir(exist_ok=True)
+    timestamp = datetime.now(UTC)
+    prefix = f"{timestamp:%Y%m%dT%H%M%S%fZ}-{checkpoint.stem}-"
+    with NamedTemporaryFile("w", encoding="utf-8", dir=directory, prefix=prefix, suffix=".tmp") as stream:
+        json.dump({"timestamp": timestamp.isoformat(), **report}, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        # Publish the complete file atomically, without replacing another report.
+        path = Path(stream.name).with_suffix(".json")
+        path.hardlink_to(stream.name)
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="评估 Double DQN 在内置关卡或固定随机地图上的表现")
     parser.add_argument("--checkpoint", type=Path, required=True, help="训练保存的检查点")
@@ -112,6 +130,7 @@ def main() -> None:
         parser.error("检查点缺少在线网络权重 online")
     model = make_network(version)
     model.load_state_dict(checkpoint["online"])
+    checkpoint_steps = checkpoint.get("steps")
     del checkpoint
     model.to(device).eval()
 
@@ -120,6 +139,14 @@ def main() -> None:
         allowed = mask_batch([mask], device)
         return int(values.masked_fill(~allowed, -torch.inf).argmax(dim=1).item())
 
+    with torch.inference_mode():
+        run_evaluation(args, greedy, str(device), version, checkpoint_steps)
+
+
+def run_evaluation(
+    args: argparse.Namespace, greedy: Callable[[bytes, Sequence[int]], int],
+    device: str, version: int, checkpoint_steps: int | None,
+) -> None:
     # This stream never advances the map generator. Both policies see identical maps.
     actions_rng = random.Random(args.seed + 1)
 
@@ -131,36 +158,58 @@ def main() -> None:
     random_wins = Counter()
     outcomes = Counter()
     zero_push = 0
+    levels = []
     source = "内置关卡" if args.generated is None else f"生成 {args.generated} 关，最多 {args.max_boxes} 箱"
     print(f"{source}，种子 {args.seed}，设备 {device}，模型 v{version}，每关最多移动 {args.max_steps} 步")
     boards = evaluation_boards(args.generated, args.max_boxes, args.seed)
-    with torch.inference_mode():
-        for level, (title, rows) in enumerate(boards, start=1):
-            game = Game(rows)
-            boxes = len(game.boxes)
-            outcome = play_level(game, greedy, args.max_steps)
-            attempts[boxes] += 1
-            wins[boxes] += int(game.won)
-            outcomes[outcome] += 1
-            zero_push += int(game.pushes == 0)
-            if args.generated is None:
-                print(f"{level:02d} {title} | {boxes} 箱 | {outcome} | {game.moves} 步 {game.pushes} 推")
-            if args.compare_random:
-                baseline = Game(rows)
-                play_level(baseline, random_action, args.max_steps, detect_cycle=False)
-                random_wins[boxes] += int(baseline.won)
+    for level, (title, rows) in enumerate(boards, start=1):
+        game = Game(rows)
+        boxes = len(game.boxes)
+        outcome = play_level(game, greedy, args.max_steps)
+        attempts[boxes] += 1
+        wins[boxes] += int(game.won)
+        outcomes[outcome] += 1
+        zero_push += int(game.pushes == 0)
+        record = {
+            "level": level, "title": title, "boxes": boxes,
+            "model": {"outcome": outcome, "moves": game.moves, "pushes": game.pushes},
+        }
+        if args.generated is None:
+            print(f"{level:02d} {title} | {boxes} 箱 | {outcome} | {game.moves} 步 {game.pushes} 推")
+        if args.compare_random:
+            baseline = Game(rows)
+            random_outcome = play_level(baseline, random_action, args.max_steps, detect_cycle=False)
+            random_wins[boxes] += int(baseline.won)
+            record["random"] = {"outcome": random_outcome, "moves": baseline.moves, "pushes": baseline.pushes}
+        levels.append(record)
 
-    def report(label: str, won: int, trials: int, random_won: int) -> None:
+    def report(label: str, won: int, trials: int, random_won: int) -> dict:
+        counts = {"wins": won, "attempts": trials}
         result = f"{label}通关 {won}/{trials}（{won / trials:.1%}）"
         if args.compare_random:
             result += f" | 随机基线 {random_won}/{trials}（{random_won / trials:.1%}）"
+            counts["random_wins"] = random_won
         print(result)
+        return counts
 
+    by_boxes = {}
     for boxes, count in sorted(attempts.items()):
-        report(f"{boxes} 箱", wins[boxes], count, random_wins[boxes])
-    report("总", wins.total(), attempts.total(), random_wins.total())
+        by_boxes[boxes] = report(f"{boxes} 箱", wins[boxes], count, random_wins[boxes])
+    summary = report("总", wins.total(), attempts.total(), random_wins.total())
+    summary.update(cycles=outcomes["循环"], timeouts=outcomes["达到步数上限"],
+                   no_legal_actions=outcomes["无可用动作"], zero_push=zero_push)
     print(f"模型循环 {outcomes['循环']} 局，步数耗尽 {outcomes['达到步数上限']} 局，"
           f"无可用动作 {outcomes['无可用动作']} 局，零次推动 {zero_push} 局")
+    path = save_report(args.checkpoint, {
+        "checkpoint": args.checkpoint.name,
+        "checkpoint_steps": checkpoint_steps, "version": version, "device": device,
+        "source": "builtin" if args.generated is None else "generated",
+        "seed": args.seed, "generated": args.generated,
+        "max_boxes": args.max_boxes if args.generated is not None else None,
+        "max_steps": args.max_steps, "compare_random": args.compare_random,
+        "summary": summary, "by_boxes": by_boxes, "levels": levels,
+    })
+    print(f"评估报告已保存到 {path}")
 
 
 if __name__ == "__main__":

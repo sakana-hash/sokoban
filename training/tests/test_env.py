@@ -49,6 +49,22 @@ class EnvironmentTests(unittest.TestCase):
         game = Game(("########", "#@*  $.#", "########"))
         self.assertAlmostEqual(step_game(game, ACTIONS.index("right")), -1.01)
 
+    def test_walk_revisits_cost_extra_until_a_box_moves(self):
+        game = Game(("#######", "#@ $ .#", "#     #", "#######"))
+        visited = {game.player}
+        moves = (
+            ("down", -0.01), ("right", -0.01), ("up", -0.01),
+            ("left", -0.03),  # A four-step loop back to the starting square.
+            ("right", -0.03), ("left", -0.03), ("right", -0.03),
+            ("right", -0.01),  # Push the box one square without reaching the goal.
+            ("left", -0.01),  # Previously visited before the push.
+            ("right", -0.03),  # Return to the player's square just after the push.
+            ("right", 10.99),
+        )
+        for step, (direction, reward) in enumerate(moves, 1):
+            with self.subTest(step=step):
+                self.assertAlmostEqual(step_game(game, ACTIONS.index(direction), visited), reward)
+
     def test_random_games_are_bounded_and_playable(self):
         rng = random.Random(19)
         with patch("sokoban.solver.solve", side_effect=AssertionError("solver called")):

@@ -1,5 +1,6 @@
 """Short CPU integration check for the server training environment."""
 
+import json
 import os
 import random
 import subprocess
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
+from unittest.mock import patch
 
 
 @unittest.skipUnless(find_spec("torch"), "requires the separate training environment")
@@ -31,10 +33,21 @@ class TrainingRunTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "run"
             latest = output / "latest.pt"
-            self.run_cli(
+            console = self.run_cli(
                 "training.train", "--output", output, "--num-envs", "2", "--steps", "8",
                 "--batch-size", "2", "--warmup", "2", "--replay-size", "16",
                 "--max-episode-steps", "4", "--curriculum-steps", "4", "--validation-rooms", "1",
+            )
+            metrics = output / "metrics.jsonl"
+            first_lines = metrics.read_text(encoding="utf-8").splitlines()
+            start, *events = map(json.loads, first_lines)
+            self.assertEqual((start["event"], start["steps"], start["target_steps"]), ("start", 0, 8))
+            self.assertIsNone(start["resume"])
+            self.assertEqual(start["config"]["num_envs"], 2)
+            self.assertEqual([e["event"] for e in events], ["validation", "train", "validation"])
+            self.assertEqual(
+                [{k: v for k, v in e.items() if k not in ("event", "timestamp")} for e in events],
+                [json.loads(line) for line in console.splitlines() if line.startswith("{")],
             )
             initial = torch.load(latest, map_location="cpu", weights_only=True)
             experience = initial["replay"]["items"]
@@ -47,6 +60,11 @@ class TrainingRunTest(unittest.TestCase):
                 self.assertEqual((x1 - x0, y1 - y0), DIRECTIONS[ACTIONS[action]])
 
             self.run_cli("training.train", "--resume", latest, "--steps", "12")
+            lines = metrics.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[:len(first_lines)], first_lines)
+            restart, train, validation = map(json.loads, lines[len(first_lines):])
+            self.assertEqual((restart["event"], restart["steps"], restart["resume"]), ("start", 8, str(latest)))
+            self.assertEqual((train["steps"], validation["validation_steps"]), (12, 12))
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["steps"], 12)
             self.assertGreater(resumed["updates"], initial["updates"])
@@ -110,3 +128,31 @@ class TrainingRunTest(unittest.TestCase):
             self.assertEqual(resumed["version"], 1)
             self.assertEqual(resumed["steps"], 4)
             self.assertGreater(resumed["updates"], 0)
+
+    def test_resume_mid_walk_restores_the_next_revisit_reward(self):
+        import torch
+        from training.env import ACTIONS, Game, potential, shaped_reward
+        from training.runner import DISCOUNT, Episode, Trainer
+        from training.train import Config
+
+        config = Config(num_envs=1)
+        trainer = Trainer(config, "cpu", None)
+        game = Game(("#######", "# @ $.#", "#######"))
+        trainer.slots = [Episode(game, 2)]
+        with patch.object(trainer, "actions", return_value=[ACTIONS.index("left")]):
+            trainer.advance(1)
+        with tempfile.TemporaryDirectory() as temporary:
+            trainer.save(Path(temporary))
+            checkpoint = torch.load(Path(temporary) / "latest.pt", weights_only=True)
+
+        # At the left wall the only legal move returns to the starting square.
+        for has_history, expected_base in ((True, -0.03), (False, -0.01)):
+            with self.subTest(has_history=has_history):
+                if not has_history:
+                    del checkpoint["slots"][0]["visited_since_push"]
+                resumed = Trainer(config, "cpu", checkpoint)
+                game = resumed.slots[0].game
+                before = potential(game)
+                resumed.advance(1)
+                expected = shaped_reward(expected_base, before, potential(game), False, DISCOUNT)
+                self.assertAlmostEqual(resumed.replay.state_dict()["items"][-1][2], expected)

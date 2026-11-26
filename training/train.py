@@ -5,6 +5,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+DEFAULT_OUTPUT = Path("runs/ddqn-v2")
+
+
 @dataclass(frozen=True)
 class Config:
     seed: int = 42
@@ -22,7 +25,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="用 Double DQN 在随机关卡中自主试玩")
     parser.add_argument("--steps", type=int, default=250_000, help="累计角色移动步数，包括已完成的步数")
     parser.add_argument("--device", choices=("cuda", "cpu", "auto"), default="cuda")
-    parser.add_argument("--output", type=Path, help="新任务默认 training/runs/ddqn-v2")
+    parser.add_argument("--output", type=Path, help=f"新任务默认保存到项目根目录下的 {DEFAULT_OUTPUT}")
     parser.add_argument("--resume", type=Path, help="从完整的 latest.pt 恢复")
     parser.add_argument("--save-every", type=int, default=25_000, help="每多少个环境步保存一次")
     options = {
@@ -57,7 +60,7 @@ def main() -> None:
         device = select_device(args.device)
         checkpoint = None
         config = Config()
-        output = args.output or Path("training/runs/ddqn-v2")
+        output = args.output or (Path(__file__).resolve().parents[1] / DEFAULT_OUTPUT)
         if args.resume:
             checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
             checkpoint_version(checkpoint)
