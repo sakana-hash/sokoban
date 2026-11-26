@@ -14,7 +14,10 @@ import torch
 
 from .curriculum import next_stage, single_box_easy_probability, validation_games
 from .dqn import ReplayBuffer, make_network, mask_batch, optimize, state_batch
-from .env import Game, Point, encode, legal_mask, make_training_game, potential, shaped_reward, step_game
+from .env import (
+    Game, Point, encode, is_deadlocked, legal_mask, make_training_game, potential,
+    pushed_into_deadlock, shaped_reward, step_game,
+)
 from .evaluate import play_batch
 from .runtime import checkpoint_version
 
@@ -56,6 +59,7 @@ class Trainer:
         self.updates = 0
         self.episodes = 0
         self.episodes_won = 0
+        self.episodes_deadlocked = 0
         self.episodes_unknown = 0
         self.recent_wins = deque(maxlen=100)
         self.last_loss = None
@@ -81,6 +85,13 @@ class Trainer:
     def epsilon(self):
         elapsed = max(0, self.steps - self.config.warmup)
         return 1.0 - 0.95 * min(1.0, elapsed / self.config.epsilon_steps)
+
+    def finish_episode(self, *, won: bool, deadlocked: bool) -> Episode:
+        self.episodes += 1
+        self.episodes_won += int(won)
+        self.episodes_deadlocked += int(deadlocked)
+        self.recent_wins.append(won)
+        return self.new_episode()
 
     @torch.no_grad()
     def greedy(self, states, masks):
@@ -109,6 +120,7 @@ class Trainer:
         before = self.steps
         for i, (slot, action) in enumerate(zip(slots, self.actions(slots))):
             previous = slot.state
+            previous_boxes = slot.game.boxes
             reward = step_game(
                 slot.game, action, slot.visited_since_push, revisit_penalty=self.config.revisit_penalty,
             )
@@ -116,7 +128,10 @@ class Trainer:
             slot.state = encode(slot.game)
             slot.mask = legal_mask(slot.game)
             won = slot.game.won
-            terminal = won or not any(slot.mask)
+            deadlocked = not won and pushed_into_deadlock(slot.game, previous_boxes)
+            if deadlocked:
+                reward += self.config.deadlock_penalty
+            terminal = won or deadlocked or not any(slot.mask)
             if self.version == 2:
                 after = potential(slot.game)
                 reward = shaped_reward(reward, slot.potential, after, terminal, DISCOUNT)
@@ -125,10 +140,7 @@ class Trainer:
             self.steps += 1
             if terminal or slot.length >= self.config.max_episode_steps:
                 # A time limit resets the collector, but the stored state can still bootstrap.
-                self.episodes += 1
-                self.episodes_won += int(won)
-                self.recent_wins.append(won)
-                self.slots[i] = self.new_episode()
+                self.slots[i] = self.finish_episode(won=won, deadlocked=deadlocked)
 
         first_update = max(before + 1, self.config.warmup, self.config.batch_size)
         for _ in range((first_update + 3) // 4 * 4, self.steps + 1, 4):
@@ -146,11 +158,15 @@ class Trainer:
     def validate(self):
         per_count = self.config.validation_rooms
         wins = [0] * 4
+        deadlocks = [0] * 4
         games = [game for _, game in validation_games(per_count)]
         for start in range(0, len(games), self.config.batch_size):
-            play_batch(games[start:start + self.config.batch_size], self.greedy, 256)
-        for game in games:
-            wins[len(game.boxes) - 1] += int(game.won)
+            batch = games[start:start + self.config.batch_size]
+            outcomes = play_batch(batch, self.greedy, 256)
+            for game, outcome in zip(batch, outcomes, strict=True):
+                group = len(game.boxes) - 1
+                wins[group] += int(game.won)
+                deadlocks[group] += int(outcome == "死锁")
         score = sum(wins)
         if self.best_policy is None or score > self.best_policy["wins"]:
             self.best_policy = self.policy() | {"wins": score}
@@ -160,6 +176,7 @@ class Trainer:
         self.stage = next_stage(self.stage, wins, per_count)
         return {
             "validation_steps": self.steps, "wins_by_boxes_1_to_4": wins, "rooms_per_group": per_count,
+            "deadlocks_by_boxes_1_to_4": deadlocks,
             "training_max_boxes": self.stage, "best_validation_step": self.best_policy["steps"],
         }
 
@@ -171,6 +188,7 @@ class Trainer:
             "episodes": self.episodes,
             "episodes_won": self.episodes_won,
             "episodes_lost": self.episodes - self.episodes_won - self.episodes_unknown,
+            "episodes_deadlocked": self.episodes_deadlocked,
             "episodes_unknown": self.episodes_unknown,
         }
 
@@ -209,6 +227,7 @@ class Trainer:
         self.recent_wins.extend(checkpoint["recent_wins"])
         # Older checkpoints only kept outcomes for the last 100 completed episodes.
         self.episodes_won = checkpoint.get("episodes_won", sum(self.recent_wins))
+        self.episodes_deadlocked = checkpoint.get("episodes_deadlocked", 0)
         self.episodes_unknown = checkpoint.get("episodes_unknown", self.episodes - len(self.recent_wins))
         self.stage = checkpoint.get("stage", min(4, 1 + self.steps // self.config.curriculum_steps))
         self.best_policy = checkpoint.get("best_policy")
@@ -218,6 +237,10 @@ class Trainer:
         ]
         self.rng.setstate(checkpoint["rng"])
         torch.set_rng_state(checkpoint["torch_rng"])
+        # A checkpoint from before deadlock detection can still contain a stranded box.
+        for i, slot in enumerate(self.slots):
+            if is_deadlocked(slot.game):
+                self.slots[i] = self.finish_episode(won=False, deadlocked=True)
 
     def training_metrics(self):
         rate = sum(self.recent_wins) / len(self.recent_wins) if self.recent_wins else None

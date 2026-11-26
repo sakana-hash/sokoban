@@ -28,6 +28,9 @@ class EvaluationTests(unittest.TestCase):
                 count = sum(row[policy]["outcome"] == "通关" for row in paired["levels"])
                 self.assertEqual(paired["summary"][field], count)
                 self.assertEqual(paired["by_boxes"]["1"][field], count)
+            for policy, field in [("model", "deadlocks"), ("random", "random_deadlocks")]:
+                count = sum(row[policy]["outcome"] == "死锁" for row in paired["levels"])
+                self.assertEqual(paired["summary"][field], count)
 
             args.compare_random = False
             run_evaluation(args, greedy, "cpu", 2, None)
@@ -35,6 +38,7 @@ class EvaluationTests(unittest.TestCase):
             solo = json.loads(second.read_text(encoding="utf-8"))
             self.assertIsNone(solo["checkpoint_steps"])
             self.assertNotIn("random_wins", solo["summary"])
+            self.assertNotIn("random_deadlocks", solo["summary"])
             self.assertTrue(all("random" not in row for row in solo["levels"]))
             self.assertEqual([row["model"] for row in solo["levels"]], [row["model"] for row in paired["levels"]])
             self.assertEqual(json.loads(first.read_text(encoding="utf-8")), paired)
@@ -56,6 +60,16 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(
             play_level(Game(rows), follow_directions(), 4, detect_cycle=False), "通关"
         )
+
+    def test_deadlock_on_the_last_move_and_at_start(self):
+        rows = ("######", "#.@$ #", "#    #", "######")
+        for detect_cycle in (True, False):
+            with self.subTest(detect_cycle=detect_cycle):
+                game = Game(rows)
+                outcome = play_level(game, lambda *_: ACTIONS.index("right"), 1, detect_cycle=detect_cycle)
+                self.assertEqual((outcome, game.moves, game.pushes), ("死锁", 1, 1))
+                outcome = play_level(game, lambda *_: self.fail("deadlocked game requested an action"), 5)
+                self.assertEqual((outcome, game.moves), ("死锁", 1))
 
     def test_each_physical_move_requires_one_four_way_decision(self):
         rows = ("########", "#@  $. #", "########")

@@ -3,8 +3,8 @@ import unittest
 from unittest.mock import patch
 
 from training.env import (
-    ACTIONS, AREA, SIDE, Game, encode, legal_mask, make_training_game, potential,
-    shaped_reward, step_game,
+    ACTIONS, AREA, SIDE, Game, encode, is_deadlocked, legal_mask, make_training_game,
+    potential, pushed_into_deadlock, shaped_reward, step_game,
 )
 
 
@@ -48,6 +48,31 @@ class EnvironmentTests(unittest.TestCase):
         self.assertFalse(any(legal_mask(game)))
         game = Game(("########", "#@*  $.#", "########"))
         self.assertAlmostEqual(step_game(game, ACTIONS.index("right")), -1.01)
+
+    def test_wall_corners_and_filled_squares(self):
+        boards = [
+            (True, ("#######", "#    .#", "#  #  #", "# #$  #", "#   @ #", "#######")),
+            (True, ("$ .", " @ ", "   ")),  # Map boundary acts as walls.
+            (True, ("########", "# @ .. #", "#  #$  #", "#  $#  #", "#      #", "########")),
+            (True, ("########", "# @....#", "#  $$  #", "#  $$  #", "#      #", "########")),
+            (False, ("#######", "# @$. #", "#######")),  # Box in a straight corridor.
+            (False, ("########", "#  **  #", "# @ $ .#", "#      #", "########")),
+        ]
+        for expected, board in boards:
+            with self.subTest(board=board):
+                self.assertEqual(is_deadlocked(Game(board)), expected)
+
+    def test_push_onto_goal_can_freeze_another_box(self):
+        game = Game(("########", "#      #", "#  ##  #", "#  $.$@#", "# .    #", "########"))
+        self.assertFalse(is_deadlocked(game))
+        previous = game.boxes
+        self.assertTrue(game.move("down"))
+        self.assertFalse(pushed_into_deadlock(game, previous))
+        self.assertTrue(game.move("up"))
+        self.assertTrue(game.move("left"))
+        self.assertIn((4, 3), game.goals & game.boxes)
+        self.assertTrue(pushed_into_deadlock(game, previous))
+        self.assertTrue(is_deadlocked(game))
 
     def test_walk_revisits_cost_extra_until_a_box_moves(self):
         game = Game(("#######", "#@ $ .#", "#     #", "#######"))

@@ -37,7 +37,7 @@ class TrainingRunTest(unittest.TestCase):
                 "training.train", "--output", output, "--num-envs", "2", "--steps", "8",
                 "--batch-size", "2", "--warmup", "2", "--replay-size", "16",
                 "--max-episode-steps", "4", "--curriculum-steps", "4", "--validation-rooms", "1",
-                "--revisit-penalty", "0.04",
+                "--revisit-penalty", "0.04", "--deadlock-penalty", "-10",
             )
             metrics = output / "metrics.jsonl"
             first_lines = metrics.read_text(encoding="utf-8").splitlines()
@@ -46,6 +46,7 @@ class TrainingRunTest(unittest.TestCase):
             self.assertIsNone(start["resume"])
             self.assertEqual(start["config"]["num_envs"], 2)
             self.assertEqual(start["config"]["revisit_penalty"], 0.04)
+            self.assertEqual(start["config"]["deadlock_penalty"], -10)
             self.assertEqual([e["event"] for e in events], ["validation", "train", "validation"])
             self.assertEqual(
                 [{k: v for k, v in e.items() if k not in ("event", "timestamp")} for e in events],
@@ -70,6 +71,8 @@ class TrainingRunTest(unittest.TestCase):
             restart, train, validation = map(json.loads, lines[len(first_lines):])
             self.assertEqual((restart["event"], restart["steps"], restart["resume"]), ("start", 8, str(latest)))
             self.assertEqual(restart["config"]["revisit_penalty"], 0.04)
+            self.assertEqual(restart["config"]["deadlock_penalty"], -10)
+            self.assertEqual(len(validation["deadlocks_by_boxes_1_to_4"]), 4)
             self.assertEqual((train["steps"], validation["validation_steps"]), (12, 12))
             resumed = torch.load(latest, map_location="cpu", weights_only=True)
             self.assertEqual(resumed["steps"], 12)
@@ -203,3 +206,25 @@ class TrainingRunTest(unittest.TestCase):
             resumed = Trainer(config, "cpu", torch.load(output / "latest.pt", weights_only=True))
             metrics = resumed.training_metrics()
             self.assertEqual(tuple(metrics[key] for key in fields), (122, 61, 41, 20))
+
+    def test_deadlocking_push_records_terminal_reward_even_on_last_step(self):
+        from training.env import ACTIONS, Game, potential, shaped_reward
+        from training.runner import DISCOUNT, Episode, Trainer
+        from training.train import Config
+
+        for penalty in (-1.0, -10.0, 0.0):
+            with self.subTest(penalty=penalty):
+                config = Config(num_envs=1, max_episode_steps=1, deadlock_penalty=penalty)
+                trainer = Trainer(config, "cpu", None)
+                game = Game(("#######", "# $@ .#", "#     #", "#######"))
+                trainer.slots = [Episode(game, 2)]
+                before = potential(game)
+                with patch.object(trainer, "actions", return_value=[ACTIONS.index("left")]):
+                    trainer.advance(1)
+                _, _, reward, _, legal, terminal = trainer.replay.state_dict()["items"][0]
+                self.assertTrue(any(legal))  # The player can still walk away from the frozen box.
+                self.assertTrue(terminal)
+                self.assertAlmostEqual(reward, shaped_reward(-0.01 + penalty, before, 0, True, DISCOUNT))
+                self.assertEqual(trainer.episode_counts()["episodes_lost"], 1)
+                self.assertEqual(trainer.episodes_deadlocked, 1)
+                self.assertIsNot(trainer.slots[0].game, game)

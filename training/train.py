@@ -22,6 +22,7 @@ class Config:
     max_episode_steps: int = 256
     validation_rooms: int = 32
     revisit_penalty: float = DEFAULT_REVISIT_PENALTY
+    deadlock_penalty: float = -1.0
 
 
 def main() -> None:
@@ -33,6 +34,8 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=25_000, help="每多少个环境步保存一次")
     parser.add_argument("--revisit-penalty", type=float,
                         help=f"v2 训练中每次折返的额外扣分，默认 {DEFAULT_REVISIT_PENALTY}，0 表示关闭")
+    parser.add_argument("--deadlock-penalty", type=float,
+                        help=f"推入死锁时加到奖励上的值，默认 {Config.deadlock_penalty}，设为 0 仍结束该局")
     options = {
         "seed": "随机种子",
         "num_envs": "每轮同时采样的环境数",
@@ -52,6 +55,8 @@ def main() -> None:
         parser.error("--steps 和 --save-every 必须大于 0")
     if args.revisit_penalty is not None and (not isfinite(args.revisit_penalty) or args.revisit_penalty < 0):
         parser.error("--revisit-penalty 必须为非负有限数")
+    if args.deadlock_penalty is not None and (not isfinite(args.deadlock_penalty) or args.deadlock_penalty > 0):
+        parser.error("--deadlock-penalty 必须为非正有限数")
 
     try:
         import torch

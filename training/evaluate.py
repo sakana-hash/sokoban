@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from .env import encode, legal_mask, make_training_game, step_game
+from .env import encode, is_deadlocked, legal_mask, make_training_game, pushed_into_deadlock, step_game
 from sokoban import Game, LEVELS
 
 
@@ -23,8 +23,8 @@ def play_batch(
     """Make one inference call for all games awaiting a decision in each round."""
     limits = [g.moves + max_steps for g in games]
     seen = [set() for _ in games]
-    outcomes = [""] * len(games)
-    active = list(range(len(games)))
+    outcomes = ["死锁" if is_deadlocked(game) else "" for game in games]
+    active = [i for i, outcome in enumerate(outcomes) if not outcome]
     while active:
         states = []
         masks = []
@@ -51,9 +51,15 @@ def play_batch(
         if not pending:
             break
         actions = choose_batch(states, masks)
+        active = []
         for i, action in zip(pending, actions, strict=True):
-            step_game(games[i], action)
-        active = pending
+            game = games[i]
+            previous_boxes = game.boxes
+            step_game(game, action)
+            if pushed_into_deadlock(game, previous_boxes):
+                outcomes[i] = "死锁"
+            else:
+                active.append(i)
     return outcomes
 
 
@@ -156,6 +162,7 @@ def run_evaluation(
     attempts = Counter()
     wins = Counter()
     random_wins = Counter()
+    random_deadlocks = 0
     outcomes = Counter()
     zero_push = 0
     levels = []
@@ -180,6 +187,7 @@ def run_evaluation(
             baseline = Game(rows)
             random_outcome = play_level(baseline, random_action, args.max_steps, detect_cycle=False)
             random_wins[boxes] += int(baseline.won)
+            random_deadlocks += int(random_outcome == "死锁")
             record["random"] = {"outcome": random_outcome, "moves": baseline.moves, "pushes": baseline.pushes}
         levels.append(record)
 
@@ -196,10 +204,13 @@ def run_evaluation(
     for boxes, count in sorted(attempts.items()):
         by_boxes[boxes] = report(f"{boxes} 箱", wins[boxes], count, random_wins[boxes])
     summary = report("总", wins.total(), attempts.total(), random_wins.total())
-    summary.update(cycles=outcomes["循环"], timeouts=outcomes["达到步数上限"],
+    summary.update(cycles=outcomes["循环"], deadlocks=outcomes["死锁"], timeouts=outcomes["达到步数上限"],
                    no_legal_actions=outcomes["无可用动作"], zero_push=zero_push)
-    print(f"模型循环 {outcomes['循环']} 局，步数耗尽 {outcomes['达到步数上限']} 局，"
+    print(f"模型循环 {outcomes['循环']} 局，死锁 {outcomes['死锁']} 局，步数耗尽 {outcomes['达到步数上限']} 局，"
           f"无可用动作 {outcomes['无可用动作']} 局，零次推动 {zero_push} 局")
+    if args.compare_random:
+        summary["random_deadlocks"] = random_deadlocks
+        print(f"随机基线死锁 {random_deadlocks} 局")
     path = save_report(args.checkpoint, {
         "checkpoint": args.checkpoint.name,
         "checkpoint_steps": checkpoint_steps, "version": version, "device": device,
